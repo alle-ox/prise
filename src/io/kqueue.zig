@@ -358,7 +358,7 @@ pub const Loop = struct {
                     .userdata = ctx.ptr,
                     .msg = ctx.msg,
                     .callback = ctx.cb,
-                    .result = .{ .recv = bytes_sent },
+                    .result = .{ .send = bytes_sent },
                 });
             },
 

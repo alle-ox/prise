@@ -1,6 +1,8 @@
 const std = @import("std");
 const io = @import("io.zig");
 const server = @import("server.zig");
+const rpc = @import("rpc.zig");
+const msgpack = @import("msgpack.zig");
 const posix = std.posix;
 
 pub fn main() !void {
@@ -63,8 +65,13 @@ pub fn main() !void {
         connected: bool = false,
         connection_refused: bool = false,
         fd: posix.fd_t = undefined,
+        allocator: std.mem.Allocator,
+        recv_buffer: [4096]u8 = undefined,
+        send_buffer: ?[]u8 = null,
+        pty_id: ?i64 = null,
+        response_received: bool = false,
 
-        fn onConnected(_: *io.Loop, completion: io.Completion) anyerror!void {
+        fn onConnected(l: *io.Loop, completion: io.Completion) anyerror!void {
             const app = completion.userdataCast(@This());
 
             switch (completion.result) {
@@ -72,6 +79,14 @@ pub fn main() !void {
                     app.fd = fd;
                     app.connected = true;
                     std.log.info("Connected! fd={}", .{app.fd});
+
+                    // Send spawn_pty request: [0, msgid, "spawn_pty", []]
+                    app.send_buffer = try msgpack.encode(app.allocator, .{ 0, 1, "spawn_pty", .{} });
+
+                    _ = try l.send(fd, app.send_buffer.?, .{
+                        .ptr = app,
+                        .cb = onSendComplete,
+                    });
                 },
                 .err => |err| {
                     if (err == error.ConnectionRefused) {
@@ -83,9 +98,89 @@ pub fn main() !void {
                 else => unreachable,
             }
         }
+
+        fn onSendComplete(l: *io.Loop, completion: io.Completion) anyerror!void {
+            const app = completion.userdataCast(@This());
+
+            // Free send buffer after send completes
+            if (app.send_buffer) |buf| {
+                app.allocator.free(buf);
+                app.send_buffer = null;
+            }
+
+            switch (completion.result) {
+                .send => |bytes_sent| {
+                    std.log.info("Sent {} bytes", .{bytes_sent});
+
+                    // Start receiving response
+                    _ = try l.recv(app.fd, &app.recv_buffer, .{
+                        .ptr = app,
+                        .cb = onRecv,
+                    });
+                },
+                .err => |err| {
+                    std.log.err("Send failed: {}", .{err});
+                },
+                else => unreachable,
+            }
+        }
+
+        fn onRecv(_: *io.Loop, completion: io.Completion) anyerror!void {
+            const app = completion.userdataCast(@This());
+
+            switch (completion.result) {
+                .recv => |bytes_read| {
+                    if (bytes_read == 0) {
+                        std.log.info("Server closed connection", .{});
+                        return;
+                    }
+
+                    const data = app.recv_buffer[0..bytes_read];
+                    const msg = try rpc.decodeMessage(app.allocator, data);
+                    defer msg.deinit(app.allocator);
+
+                    switch (msg) {
+                        .response => |resp| {
+                            std.log.info("Got response: msgid={}", .{resp.msgid});
+                            if (resp.err) |err| {
+                                std.log.err("Error: {}", .{err});
+                            } else {
+                                switch (resp.result) {
+                                    .integer => |i| {
+                                        app.pty_id = i;
+                                        std.log.info("PTY spawned with ID: {}", .{i});
+                                    },
+                                    .unsigned => |u| {
+                                        app.pty_id = @intCast(u);
+                                        std.log.info("PTY spawned with ID: {}", .{u});
+                                    },
+                                    .string => |s| {
+                                        std.log.info("Result: {s}", .{s});
+                                    },
+                                    else => {
+                                        std.log.info("Result: {}", .{resp.result});
+                                    },
+                                }
+                            }
+                            app.response_received = true;
+                        },
+                        .request => {
+                            std.log.warn("Got unexpected request from server", .{});
+                        },
+                        .notification => {
+                            std.log.info("Got notification from server", .{});
+                        },
+                    }
+                },
+                .err => |err| {
+                    std.log.err("Recv failed: {}", .{err});
+                },
+                else => unreachable,
+            }
+        }
     };
 
-    var app: App = .{};
+    var app: App = .{ .allocator = allocator };
 
     _ = try connectUnixSocket(
         &loop,
@@ -136,7 +231,7 @@ pub fn main() !void {
 
             // Retry connection
             loop = try io.Loop.init(allocator);
-            app = .{};
+            app = .{ .allocator = allocator };
             _ = try connectUnixSocket(
                 &loop,
                 socket_path,
@@ -149,6 +244,11 @@ pub fn main() !void {
     if (app.connected) {
         defer posix.close(app.fd);
         std.log.info("Connection successful!", .{});
+        if (app.response_received) {
+            if (app.pty_id) |pty_id| {
+                std.log.info("Ready with PTY ID: {}", .{pty_id});
+            }
+        }
     }
 }
 

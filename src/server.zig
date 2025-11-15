@@ -8,6 +8,25 @@ const Client = struct {
     fd: posix.fd_t,
     server: *Server,
     recv_buffer: [4096]u8 = undefined,
+    send_buffer: ?[]u8 = null,
+
+    fn onSendComplete(_: *io.Loop, completion: io.Completion) anyerror!void {
+        const client = completion.userdataCast(Client);
+
+        // Free send buffer
+        if (client.send_buffer) |buf| {
+            client.server.allocator.free(buf);
+            client.send_buffer = null;
+        }
+
+        switch (completion.result) {
+            .send => {},
+            .err => |err| {
+                std.log.err("Send failed: {}", .{err});
+            },
+            else => unreachable,
+        }
+    }
 
     fn handleMessage(self: *Client, loop: *io.Loop, data: []const u8) !void {
         const msg = try rpc.decodeMessage(self.server.allocator, data);
@@ -15,7 +34,7 @@ const Client = struct {
 
         switch (msg) {
             .request => |req| {
-                std.log.info("Got request: msgid={} method={s}", .{ req.msgid, req.method });
+                // std.log.info("Got request: msgid={} method={s}", .{ req.msgid, req.method });
 
                 // Dispatch to handler
                 const result = try self.server.handleRequest(req.method, req.params);
@@ -31,21 +50,19 @@ const Client = struct {
                 response_arr[3] = result; // result
 
                 const response_value = msgpack.Value{ .array = response_arr };
-                const response = try msgpack.encodeFromValue(self.server.allocator, response_value);
-                defer self.server.allocator.free(response);
+                self.send_buffer = try msgpack.encodeFromValue(self.server.allocator, response_value);
 
-                _ = try loop.send(self.fd, response, .{
-                    .ptr = null,
-                    .cb = struct {
-                        fn noop(_: *io.Loop, _: io.Completion) anyerror!void {}
-                    }.noop,
+                _ = try loop.send(self.fd, self.send_buffer.?, .{
+                    .ptr = self,
+                    .cb = onSendComplete,
                 });
             },
             .notification => |notif| {
-                std.log.info("Got notification: method={s}", .{notif.method});
+                _ = notif;
+                // std.log.info("Got notification: method={s}", .{notif.method});
             },
             .response => {
-                std.log.warn("Client sent response, ignoring", .{});
+                // std.log.warn("Client sent response, ignoring", .{});
             },
         }
     }
