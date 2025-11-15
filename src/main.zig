@@ -65,7 +65,10 @@ pub fn main() !void {
     var loop = try io.Loop.init(allocator);
     defer loop.deinit();
 
-    var app: client.App = .{ .allocator = allocator };
+    var app = try client.App.init(allocator);
+    defer app.deinit();
+
+    try app.setup(&loop);
 
     _ = try client.connectUnixSocket(
         &loop,
@@ -121,7 +124,8 @@ pub fn main() !void {
 
             // Retry connection
             loop = try io.Loop.init(allocator);
-            app = .{ .allocator = allocator };
+            app = try client.App.init(allocator);
+            try app.setup(&loop);
             _ = try client.connectUnixSocket(
                 &loop,
                 socket_path,

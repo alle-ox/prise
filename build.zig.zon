@@ -8,6 +8,10 @@
             .url = "git+https://github.com/ghostty-org/ghostty#05366485daac65e6f30f476a15f7e6be6e193cc2",
             .hash = "ghostty-1.3.0-dev-5UdBC0kGNgT3WRXBSVmsBgP_3psLhgBsUHKXGNjN21ZY",
         },
+        .vaxis = .{
+            .url = "git+https://github.com/rockorager/libvaxis#main",
+            .hash = "vaxis-0.5.1-BWNV_IcuCQAVtAOYOyWPed_XZnRR5jv3JkkBUvlAFpSK",
+        },
     },
     .paths = .{
         "build.zig",

@@ -14,6 +14,13 @@ pub fn build(b: *std.Build) void {
         exe_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
     }
 
+    if (b.lazyDependency("vaxis", .{
+        .target = target,
+        .optimize = optimize,
+    })) |dep| {
+        exe_mod.addImport("vaxis", dep.module("vaxis"));
+    }
+
     const exe = b.addExecutable(.{
         .name = "prise",
         .root_module = exe_mod,

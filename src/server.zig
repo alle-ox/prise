@@ -618,9 +618,8 @@ const Server = struct {
         switch (style.fg_color) {
             .none => {},
             .palette => |idx| {
-                // For palette colors, we'd need to resolve from terminal.colors
-                // For now, just use the index as-is (will need palette lookup in future)
-                _ = idx;
+                // Send palette index directly
+                attrs.foreground = idx;
             },
             .rgb => |rgb| {
                 attrs.foreground = (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | @as(u32, rgb.b);
@@ -631,7 +630,7 @@ const Server = struct {
         switch (style.bg_color) {
             .none => {},
             .palette => |idx| {
-                _ = idx;
+                attrs.background = idx;
             },
             .rgb => |rgb| {
                 attrs.background = (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | @as(u32, rgb.b);

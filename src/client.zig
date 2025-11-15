@@ -2,7 +2,9 @@ const std = @import("std");
 const io = @import("io.zig");
 const rpc = @import("rpc.zig");
 const msgpack = @import("msgpack.zig");
+const redraw = @import("redraw.zig");
 const posix = std.posix;
+const vaxis = @import("vaxis");
 
 pub const UnixSocketClient = struct {
     allocator: std.mem.Allocator,
@@ -126,6 +128,210 @@ pub const App = struct {
     pty_id: ?i64 = null,
     response_received: bool = false,
     attached: bool = false,
+    vx: vaxis.Vaxis = undefined,
+    tty: vaxis.Tty = undefined,
+    tty_buffer: [4096]u8 = undefined,
+    should_quit: bool = false,
+    hl_attrs: std.AutoHashMap(u32, vaxis.Style) = undefined,
+
+    pub fn init(allocator: std.mem.Allocator) !App {
+        var app: App = .{
+            .allocator = allocator,
+            .vx = try vaxis.init(allocator, .{}),
+            .tty = undefined,
+            .tty_buffer = undefined,
+            .hl_attrs = std.AutoHashMap(u32, vaxis.Style).init(allocator),
+        };
+        app.tty = try vaxis.Tty.init(&app.tty_buffer);
+        return app;
+    }
+
+    pub fn deinit(self: *App) void {
+        self.hl_attrs.deinit();
+        self.vx.deinit(self.allocator, self.tty.writer());
+        self.tty.deinit();
+    }
+
+    pub fn setup(self: *App, loop: *io.Loop) !void {
+        _ = loop;
+        const winsize = try vaxis.Tty.getWinsize(self.tty.fd);
+        try self.vx.resize(self.allocator, self.tty.writer(), winsize);
+
+        try self.vx.enterAltScreen(self.tty.writer());
+        try self.vx.queryTerminal(self.tty.writer(), 1 * std.time.ns_per_s);
+        try self.tty.writer().flush();
+
+        // Show cursor at 0,0 initially
+        const win = self.vx.window();
+        win.showCursor(0, 0);
+
+        try self.render();
+    }
+
+    pub fn handleRedraw(self: *App, params: msgpack.Value) !void {
+        if (params != .array) return error.InvalidRedrawParams;
+
+        const win = self.vx.window();
+
+        for (params.array) |event_val| {
+            if (event_val != .array or event_val.array.len < 2) continue;
+
+            const event_name = event_val.array[0];
+            if (event_name != .string) continue;
+
+            const event_params = event_val.array[1];
+            if (event_params != .array) continue;
+
+            if (std.mem.eql(u8, event_name.string, "grid_cursor_goto")) {
+                // event_params is [grid, row, col]
+                if (event_params.array.len < 3) continue;
+
+                const row = switch (event_params.array[1]) {
+                    .unsigned => |u| @as(u16, @intCast(u)),
+                    .integer => |i| @as(u16, @intCast(i)),
+                    else => continue,
+                };
+                const col = switch (event_params.array[2]) {
+                    .unsigned => |u| @as(u16, @intCast(u)),
+                    .integer => |i| @as(u16, @intCast(i)),
+                    else => continue,
+                };
+
+                win.showCursor(col, row);
+            } else if (std.mem.eql(u8, event_name.string, "grid_line")) {
+                // event_params is [grid, row, col_start, cells, wrap]
+                if (event_params.array.len < 4) continue;
+
+                const row = switch (event_params.array[1]) {
+                    .unsigned => |u| @as(usize, @intCast(u)),
+                    .integer => |i| @as(usize, @intCast(i)),
+                    else => continue,
+                };
+                var col = switch (event_params.array[2]) {
+                    .unsigned => |u| @as(usize, @intCast(u)),
+                    .integer => |i| @as(usize, @intCast(i)),
+                    else => continue,
+                };
+
+                const cells = event_params.array[3];
+                if (cells != .array) continue;
+
+                var current_hl: u32 = 0;
+                for (cells.array) |cell| {
+                    if (cell != .array or cell.array.len == 0) continue;
+
+                    const text = if (cell.array[0] == .string) cell.array[0].string else " ";
+
+                    if (cell.array.len > 1 and cell.array[1] != .nil) {
+                        current_hl = switch (cell.array[1]) {
+                            .unsigned => |u| @as(u32, @intCast(u)),
+                            .integer => |i| @as(u32, @intCast(i)),
+                            else => current_hl,
+                        };
+                    }
+
+                    const repeat: usize = if (cell.array.len > 2 and cell.array[2] != .nil)
+                        switch (cell.array[2]) {
+                            .unsigned => |u| @intCast(u),
+                            .integer => |i| @intCast(i),
+                            else => 1,
+                        }
+                    else
+                        1;
+
+                    const style = self.hl_attrs.get(current_hl) orelse vaxis.Style{};
+
+                    var i: usize = 0;
+                    while (i < repeat) : (i += 1) {
+                        if (col < win.width and row < win.height) {
+                            win.writeCell(@intCast(col), @intCast(row), .{
+                                .char = .{ .grapheme = text },
+                                .style = style,
+                            });
+                        }
+                        col += 1;
+                    }
+                }
+            } else if (std.mem.eql(u8, event_name.string, "grid_clear")) {
+                win.clear();
+            } else if (std.mem.eql(u8, event_name.string, "hl_attr_define")) {
+                // event_params is [id, rgb_attrs, cterm_attrs, info]
+                if (event_params.array.len < 2) continue;
+
+                const id = switch (event_params.array[0]) {
+                    .unsigned => |u| @as(u32, @intCast(u)),
+                    .integer => |i| @as(u32, @intCast(i)),
+                    else => continue,
+                };
+
+                const rgb_attrs = event_params.array[1];
+                if (rgb_attrs != .map) continue;
+
+                var style = vaxis.Style{};
+
+                for (rgb_attrs.map) |kv| {
+                    if (kv.key != .string) continue;
+
+                    if (std.mem.eql(u8, kv.key.string, "foreground")) {
+                        if (kv.value == .unsigned) {
+                            const val = @as(u32, @intCast(kv.value.unsigned));
+                            if (val < 256) {
+                                // Palette index
+                                style.fg = .{ .index = @intCast(val) };
+                            } else {
+                                // RGB value
+                                style.fg = .{ .rgb = .{
+                                    @intCast((val >> 16) & 0xFF),
+                                    @intCast((val >> 8) & 0xFF),
+                                    @intCast(val & 0xFF),
+                                } };
+                            }
+                        }
+                    } else if (std.mem.eql(u8, kv.key.string, "background")) {
+                        if (kv.value == .unsigned) {
+                            const val = @as(u32, @intCast(kv.value.unsigned));
+                            if (val < 256) {
+                                // Palette index
+                                style.bg = .{ .index = @intCast(val) };
+                            } else {
+                                // RGB value
+                                style.bg = .{ .rgb = .{
+                                    @intCast((val >> 16) & 0xFF),
+                                    @intCast((val >> 8) & 0xFF),
+                                    @intCast(val & 0xFF),
+                                } };
+                            }
+                        }
+                    } else if (std.mem.eql(u8, kv.key.string, "bold")) {
+                        if (kv.value == .boolean and kv.value.boolean) {
+                            style.bold = true;
+                        }
+                    } else if (std.mem.eql(u8, kv.key.string, "italic")) {
+                        if (kv.value == .boolean and kv.value.boolean) {
+                            style.italic = true;
+                        }
+                    } else if (std.mem.eql(u8, kv.key.string, "underline")) {
+                        if (kv.value == .boolean and kv.value.boolean) {
+                            style.ul_style = .single;
+                        }
+                    } else if (std.mem.eql(u8, kv.key.string, "reverse")) {
+                        if (kv.value == .boolean and kv.value.boolean) {
+                            style.reverse = true;
+                        }
+                    }
+                }
+
+                try self.hl_attrs.put(id, style);
+            } else if (std.mem.eql(u8, event_name.string, "flush")) {
+                try self.render();
+            }
+        }
+    }
+
+    pub fn render(self: *App) !void {
+        try self.vx.render(self.tty.writer());
+        try self.tty.writer().flush();
+    }
 
     pub fn onConnected(l: *io.Loop, completion: io.Completion) anyerror!void {
         const app = completion.userdataCast(@This());
@@ -245,9 +451,10 @@ pub const App = struct {
                         std.log.warn("Got unexpected request from server", .{});
                     },
                     .notification => |notif| {
-                        std.log.info("Got notification: method={s}", .{notif.method});
                         if (std.mem.eql(u8, notif.method, "redraw")) {
-                            std.log.debug("Redraw notification received", .{});
+                            app.handleRedraw(notif.params) catch |err| {
+                                std.log.err("Failed to handle redraw: {}", .{err});
+                            };
                         }
                     },
                 }
