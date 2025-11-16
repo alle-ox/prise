@@ -125,6 +125,7 @@ pub const App = struct {
     fd: posix.fd_t = undefined,
     allocator: std.mem.Allocator,
     recv_buffer: [4096]u8 = undefined,
+    msg_buffer: std.ArrayList(u8),
     send_buffer: ?[]u8 = null,
     pty_id: ?i64 = null,
     response_received: bool = false,
@@ -137,6 +138,7 @@ pub const App = struct {
     event_thread: ?std.Thread = null,
     io_loop: ?*io.Loop = null,
     tty_buffer: [4096]u8 = undefined,
+    grapheme_arena: std.heap.ArenaAllocator = undefined,
 
     pub fn init(allocator: std.mem.Allocator) !App {
         var app: App = .{
@@ -146,6 +148,8 @@ pub const App = struct {
             .tty_buffer = undefined,
             .loop = undefined,
             .hl_attrs = std.AutoHashMap(u32, vaxis.Style).init(allocator),
+            .grapheme_arena = std.heap.ArenaAllocator.init(allocator),
+            .msg_buffer = .empty,
         };
         app.tty = try vaxis.Tty.init(&app.tty_buffer);
         app.loop = .{ .tty = &app.tty, .vaxis = &app.vx };
@@ -161,6 +165,8 @@ pub const App = struct {
             thread.join();
         }
         self.hl_attrs.deinit();
+        self.grapheme_arena.deinit();
+        self.msg_buffer.deinit(self.allocator);
         self.vx.deinit(self.allocator, self.tty.writer());
         self.tty.deinit();
     }
@@ -206,6 +212,9 @@ pub const App = struct {
 
     pub fn handleRedraw(self: *App, params: msgpack.Value) !void {
         if (params != .array) return error.InvalidRedrawParams;
+
+        // Reset arena - all previous graphemes will be freed
+        _ = self.grapheme_arena.reset(.retain_capacity);
 
         const win = self.vx.window();
 
@@ -302,8 +311,10 @@ pub const App = struct {
                     var i: usize = 0;
                     while (i < repeat) : (i += 1) {
                         if (col < win.width and row < win.height) {
+                            // Copy grapheme into arena for stability through render
+                            const copy = self.grapheme_arena.allocator().dupe(u8, text) catch text;
                             win.writeCell(@intCast(col), @intCast(row), .{
-                                .char = .{ .grapheme = text },
+                                .char = .{ .grapheme = copy },
                                 .style = style,
                             });
                         }
@@ -451,75 +462,95 @@ pub const App = struct {
                     return;
                 }
 
-                const data = app.recv_buffer[0..bytes_read];
-                const msg = try rpc.decodeMessage(app.allocator, data);
-                defer msg.deinit(app.allocator);
+                // Append new data to message buffer
+                try app.msg_buffer.appendSlice(app.allocator, app.recv_buffer[0..bytes_read]);
 
-                switch (msg) {
-                    .response => |resp| {
-                        std.log.info("Got response: msgid={}", .{resp.msgid});
-                        if (resp.err) |err| {
-                            std.log.err("Error: {}", .{err});
-                        } else {
-                            switch (resp.result) {
-                                .integer => |i| {
-                                    if (app.pty_id == null) {
-                                        app.pty_id = i;
-                                        std.log.info("PTY spawned with ID: {}", .{i});
+                // Try to decode as many complete messages as possible
+                while (app.msg_buffer.items.len > 0) {
+                    const result = rpc.decodeMessageWithSize(app.allocator, app.msg_buffer.items) catch |err| {
+                        if (err == error.UnexpectedEndOfInput) {
+                            // Partial message, wait for more data
+                            std.log.debug("Partial message, waiting for more data ({} bytes buffered)", .{app.msg_buffer.items.len});
+                            break;
+                        }
+                        return err;
+                    };
+                    defer result.message.deinit(app.allocator);
 
-                                        // Attach to the session
-                                        app.send_buffer = try msgpack.encode(app.allocator, .{ 0, 2, "attach_pty", .{i} });
-                                        _ = try l.send(app.fd, app.send_buffer.?, .{
-                                            .ptr = app,
-                                            .cb = onSendComplete,
-                                        });
-                                    } else if (!app.attached) {
-                                        std.log.info("Attached to session {}", .{i});
-                                        app.attached = true;
-                                    }
-                                },
-                                .unsigned => |u| {
-                                    if (app.pty_id == null) {
-                                        app.pty_id = @intCast(u);
-                                        std.log.info("PTY spawned with ID: {}", .{u});
+                    const msg = result.message;
+                    const bytes_consumed = result.bytes_consumed;
 
-                                        // Attach to the session
-                                        app.send_buffer = try msgpack.encode(app.allocator, .{ 0, 2, "attach_pty", .{u} });
-                                        _ = try l.send(app.fd, app.send_buffer.?, .{
-                                            .ptr = app,
-                                            .cb = onSendComplete,
-                                        });
-                                    } else if (!app.attached) {
-                                        std.log.info("Attached to session {}", .{u});
-                                        app.attached = true;
-                                    }
-                                },
-                                .string => |s| {
-                                    std.log.info("Result: {s}", .{s});
-                                },
-                                else => {
-                                    std.log.info("Result: {}", .{resp.result});
-                                },
+                    switch (msg) {
+                        .response => |resp| {
+                            std.log.info("Got response: msgid={}", .{resp.msgid});
+                            if (resp.err) |err| {
+                                std.log.err("Error: {}", .{err});
+                            } else {
+                                switch (resp.result) {
+                                    .integer => |i| {
+                                        if (app.pty_id == null) {
+                                            app.pty_id = i;
+                                            std.log.info("PTY spawned with ID: {}", .{i});
+
+                                            // Attach to the session
+                                            app.send_buffer = try msgpack.encode(app.allocator, .{ 0, 2, "attach_pty", .{i} });
+                                            _ = try l.send(app.fd, app.send_buffer.?, .{
+                                                .ptr = app,
+                                                .cb = onSendComplete,
+                                            });
+                                        } else if (!app.attached) {
+                                            std.log.info("Attached to session {}", .{i});
+                                            app.attached = true;
+                                        }
+                                    },
+                                    .unsigned => |u| {
+                                        if (app.pty_id == null) {
+                                            app.pty_id = @intCast(u);
+                                            std.log.info("PTY spawned with ID: {}", .{u});
+
+                                            // Attach to the session
+                                            app.send_buffer = try msgpack.encode(app.allocator, .{ 0, 2, "attach_pty", .{u} });
+                                            _ = try l.send(app.fd, app.send_buffer.?, .{
+                                                .ptr = app,
+                                                .cb = onSendComplete,
+                                            });
+                                        } else if (!app.attached) {
+                                            std.log.info("Attached to session {}", .{u});
+                                            app.attached = true;
+                                        }
+                                    },
+                                    .string => |s| {
+                                        std.log.info("Result: {s}", .{s});
+                                    },
+                                    else => {
+                                        std.log.info("Result: {}", .{resp.result});
+                                    },
+                                }
                             }
-                        }
-                        app.response_received = true;
-                    },
-                    .request => {
-                        std.log.warn("Got unexpected request from server", .{});
-                    },
-                    .notification => |notif| {
-                        if (std.mem.eql(u8, notif.method, "redraw")) {
-                            std.log.debug("Handling redraw notification", .{});
-                            app.handleRedraw(notif.params) catch |err| {
-                                std.log.err("Failed to handle redraw: {}", .{err});
-                            };
-                            std.log.debug("Redraw handled, rendering", .{});
-                            app.render() catch |err| {
-                                std.log.err("Failed to render: {}", .{err});
-                            };
-                            std.log.debug("Render complete", .{});
-                        }
-                    },
+                            app.response_received = true;
+                        },
+                        .request => {
+                            std.log.warn("Got unexpected request from server", .{});
+                        },
+                        .notification => |notif| {
+                            if (std.mem.eql(u8, notif.method, "redraw")) {
+                                std.log.debug("Handling redraw notification", .{});
+                                app.handleRedraw(notif.params) catch |err| {
+                                    std.log.err("Failed to handle redraw: {}", .{err});
+                                };
+                                std.log.debug("Redraw handled, rendering", .{});
+                                app.render() catch |err| {
+                                    std.log.err("Failed to render: {}", .{err});
+                                };
+                                std.log.debug("Render complete", .{});
+                            }
+                        },
+                    }
+
+                    // Remove consumed bytes from buffer
+                    if (bytes_consumed > 0) {
+                        try app.msg_buffer.replaceRange(app.allocator, 0, bytes_consumed, &.{});
+                    }
                 }
 
                 // Check if we should quit

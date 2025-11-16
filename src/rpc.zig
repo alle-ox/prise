@@ -67,6 +67,11 @@ pub const DecodeError = error{
     NotAString,
 } || msgpack.DecodeError;
 
+pub const DecodeResult = struct {
+    message: Message,
+    bytes_consumed: usize,
+};
+
 pub fn decodeMessage(allocator: Allocator, data: []const u8) DecodeError!Message {
     var decoder = msgpack.Decoder.init(allocator, data);
 
@@ -129,6 +134,75 @@ pub fn decodeMessage(allocator: Allocator, data: []const u8) DecodeError!Message
         },
         else => return error.InvalidMessageType,
     }
+}
+
+pub fn decodeMessageWithSize(allocator: Allocator, data: []const u8) DecodeError!DecodeResult {
+    var decoder = msgpack.Decoder.init(allocator, data);
+
+    const len = try decoder.readArrayLen();
+    if (len < 3) return error.InvalidArrayLength;
+
+    const msg_type = try decoder.readInt();
+
+    const message = switch (msg_type) {
+        0 => blk: { // Request: [0, msgid, method, params]
+            if (len != 4) return error.InvalidArrayLength;
+            const msgid = @as(u32, @intCast(try decoder.readInt()));
+            const method = try decoder.readString();
+            errdefer allocator.free(method);
+            const params = try decoder.decode();
+
+            break :blk Message{
+                .request = .{
+                    .msgid = msgid,
+                    .method = method,
+                    .params = params,
+                },
+            };
+        },
+        1 => blk: { // Response: [1, msgid, error, result]
+            if (len != 4) return error.InvalidArrayLength;
+            const msgid = @as(u32, @intCast(try decoder.readInt()));
+
+            var err_val: ?msgpack.Value = null;
+            const byte = try decoder.peekByte();
+            if (byte == 0xc0) {
+                _ = try decoder.readByte(); // consume nil
+            } else {
+                err_val = try decoder.decode();
+            }
+            errdefer if (err_val) |e| e.deinit(allocator);
+
+            const result = try decoder.decode();
+
+            break :blk Message{
+                .response = .{
+                    .msgid = msgid,
+                    .err = err_val,
+                    .result = result,
+                },
+            };
+        },
+        2 => blk: { // Notification: [2, method, params]
+            if (len != 3) return error.InvalidArrayLength;
+            const method = try decoder.readString();
+            errdefer allocator.free(method);
+            const params = try decoder.decode();
+
+            break :blk Message{
+                .notification = .{
+                    .method = method,
+                    .params = params,
+                },
+            };
+        },
+        else => return error.InvalidMessageType,
+    };
+
+    return DecodeResult{
+        .message = message,
+        .bytes_consumed = decoder.pos,
+    };
 }
 
 const testing = std.testing;
