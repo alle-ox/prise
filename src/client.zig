@@ -126,7 +126,6 @@ pub const App = struct {
     allocator: std.mem.Allocator,
     recv_buffer: [4096]u8 = undefined,
     send_buffer: ?[]u8 = null,
-    input_send_buffer: ?[]u8 = null,
     pty_id: ?i64 = null,
     response_received: bool = false,
     attached: bool = false,
@@ -160,9 +159,6 @@ pub const App = struct {
         self.loop.stop();
         if (self.event_thread) |thread| {
             thread.join();
-        }
-        if (self.input_send_buffer) |buf| {
-            self.allocator.free(buf);
         }
         self.hl_attrs.deinit();
         self.vx.deinit(self.allocator, self.tty.writer());
@@ -600,84 +596,46 @@ pub const App = struct {
             notation,
         });
 
-        // Check if we're already sending something
-        if (self.input_send_buffer != null) {
-            std.log.warn("Dropping key input - send already in progress", .{});
-            return;
-        }
-
-        self.input_send_buffer = try msgpack.encode(self.allocator, .{
+        const msg = try msgpack.encode(self.allocator, .{
             2, // notification
             "key_input",
             .{ self.pty_id.?, notation },
         });
+        defer self.allocator.free(msg);
 
-        const loop = self.io_loop orelse return error.NoIOLoop;
-        std.log.debug("Submitting send operation", .{});
-        _ = try loop.send(self.fd, self.input_send_buffer.?, .{
-            .ptr = self,
-            .cb = onInputSendComplete,
-        });
-        std.log.debug("Send operation submitted", .{});
+        try self.sendDirect(msg);
     }
 
-    fn onInputSendComplete(_: *io.Loop, completion: io.Completion) anyerror!void {
-        const app = completion.userdataCast(@This());
-
-        std.log.debug("Input send completed", .{});
-
-        if (app.input_send_buffer) |buf| {
-            app.allocator.free(buf);
-            app.input_send_buffer = null;
-        }
-
-        switch (completion.result) {
-            .send => |n| {
-                std.log.debug("Sent {} bytes", .{n});
-            },
-            .err => |err| {
-                std.log.err("Input send failed: {}", .{err});
-            },
-            else => unreachable,
+    fn sendDirect(self: *App, data: []const u8) !void {
+        var index: usize = 0;
+        while (index < data.len) {
+            const n = try posix.write(self.fd, data[index..]);
+            index += n;
         }
     }
 
     fn sendResize(self: *App, ws: vaxis.Winsize) !void {
         // Send resize_pty notification to server
-        if (self.input_send_buffer) |old_buf| {
-            self.allocator.free(old_buf);
-        }
-
-        self.input_send_buffer = try msgpack.encode(self.allocator, .{
+        const msg = try msgpack.encode(self.allocator, .{
             2, // notification
             "resize_pty",
             .{ self.pty_id.?, ws.rows, ws.cols },
         });
+        defer self.allocator.free(msg);
 
-        const loop = self.io_loop orelse return error.NoIOLoop;
-        _ = try loop.send(self.fd, self.input_send_buffer.?, .{
-            .ptr = self,
-            .cb = onInputSendComplete,
-        });
+        try self.sendDirect(msg);
     }
 
     fn sendPing(self: *App) !void {
         // Send a ping to wake up the recv loop
-        if (self.input_send_buffer) |old_buf| {
-            self.allocator.free(old_buf);
-        }
-
-        self.input_send_buffer = try msgpack.encode(self.allocator, .{
+        const msg = try msgpack.encode(self.allocator, .{
             2, // notification
             "ping",
             .{},
         });
+        defer self.allocator.free(msg);
 
-        const loop = self.io_loop orelse return error.NoIOLoop;
-        _ = try loop.send(self.fd, self.input_send_buffer.?, .{
-            .ptr = self,
-            .cb = onInputSendComplete,
-        });
+        try self.sendDirect(msg);
     }
 };
 
