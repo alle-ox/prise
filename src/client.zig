@@ -9,6 +9,7 @@ const Surface = @import("Surface.zig");
 const UI = @import("ui.zig").UI;
 const lua_event = @import("lua_event.zig");
 const widget = @import("widget.zig");
+const vaxis_helper = @import("vaxis_helper.zig");
 
 pub const MsgId = enum(u16) {
     spawn_pty = 1,
@@ -321,7 +322,7 @@ pub const ClientLogic = struct {
                 }
 
                 // Build key map in JavaScript KeyboardEvent format
-                const key_str = try vaxisKeyToString(allocator, key);
+                const key_str = try vaxis_helper.vaxisKeyToString(allocator, key);
                 defer allocator.free(key_str);
 
                 var key_map_kv = try allocator.alloc(msgpack.Value.KeyValue, 5);
@@ -352,44 +353,7 @@ pub const ClientLogic = struct {
     }
 
     pub fn vaxisKeyToString(allocator: std.mem.Allocator, key: vaxis.Key) ![]u8 {
-        // Check for named keys by codepoint matching
-        if (key.codepoint == vaxis.Key.enter) return try allocator.dupe(u8, "Enter");
-        if (key.codepoint == vaxis.Key.tab) return try allocator.dupe(u8, "Tab");
-        if (key.codepoint == vaxis.Key.backspace) return try allocator.dupe(u8, "Backspace");
-        if (key.codepoint == vaxis.Key.escape) return try allocator.dupe(u8, "Escape");
-        if (key.codepoint == vaxis.Key.space) return try allocator.dupe(u8, " ");
-        if (key.codepoint == vaxis.Key.delete) return try allocator.dupe(u8, "Delete");
-        if (key.codepoint == vaxis.Key.insert) return try allocator.dupe(u8, "Insert");
-        if (key.codepoint == vaxis.Key.home) return try allocator.dupe(u8, "Home");
-        if (key.codepoint == vaxis.Key.end) return try allocator.dupe(u8, "End");
-        if (key.codepoint == vaxis.Key.page_up) return try allocator.dupe(u8, "PageUp");
-        if (key.codepoint == vaxis.Key.page_down) return try allocator.dupe(u8, "PageDown");
-        if (key.codepoint == vaxis.Key.up) return try allocator.dupe(u8, "ArrowUp");
-        if (key.codepoint == vaxis.Key.down) return try allocator.dupe(u8, "ArrowDown");
-        if (key.codepoint == vaxis.Key.left) return try allocator.dupe(u8, "ArrowLeft");
-        if (key.codepoint == vaxis.Key.right) return try allocator.dupe(u8, "ArrowRight");
-        if (key.codepoint == vaxis.Key.f1) return try allocator.dupe(u8, "F1");
-        if (key.codepoint == vaxis.Key.f2) return try allocator.dupe(u8, "F2");
-        if (key.codepoint == vaxis.Key.f3) return try allocator.dupe(u8, "F3");
-        if (key.codepoint == vaxis.Key.f4) return try allocator.dupe(u8, "F4");
-        if (key.codepoint == vaxis.Key.f5) return try allocator.dupe(u8, "F5");
-        if (key.codepoint == vaxis.Key.f6) return try allocator.dupe(u8, "F6");
-        if (key.codepoint == vaxis.Key.f7) return try allocator.dupe(u8, "F7");
-        if (key.codepoint == vaxis.Key.f8) return try allocator.dupe(u8, "F8");
-        if (key.codepoint == vaxis.Key.f9) return try allocator.dupe(u8, "F9");
-        if (key.codepoint == vaxis.Key.f10) return try allocator.dupe(u8, "F10");
-        if (key.codepoint == vaxis.Key.f11) return try allocator.dupe(u8, "F11");
-        if (key.codepoint == vaxis.Key.f12) return try allocator.dupe(u8, "F12");
-
-        // For regular keys, use the text
-        if (key.text) |text| {
-            return try allocator.dupe(u8, text);
-        }
-
-        // Fallback to codepoint
-        var buf: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(key.codepoint, &buf) catch return try allocator.dupe(u8, "Unidentified");
-        return try allocator.dupe(u8, buf[0..len]);
+        return vaxis_helper.vaxisKeyToString(allocator, key);
     }
 };
 
@@ -1244,7 +1208,7 @@ pub const App = struct {
                                         .id = pty_id,
                                         .surface = surface,
                                         .app = app,
-                                        .send_fn = struct {
+                                        .send_key_fn = struct {
                                             fn appSendDirect(ctx: *anyopaque, id: u32, key: lua_event.KeyData) anyerror!void {
                                                 const self: *App = @ptrCast(@alignCast(ctx));
 
@@ -1277,6 +1241,41 @@ pub const App = struct {
                                                 try self.sendDirect(encoded_msg);
                                             }
                                         }.appSendDirect,
+                                        .send_mouse_fn = struct {
+                                            fn appSendMouse(ctx: *anyopaque, id: u32, mouse: lua_event.MouseData) anyerror!void {
+                                                const self: *App = @ptrCast(@alignCast(ctx));
+
+                                                var mouse_map_kv = try self.allocator.alloc(msgpack.Value.KeyValue, 7);
+                                                mouse_map_kv[0] = .{ .key = .{ .string = "col" }, .value = .{ .unsigned = mouse.col } };
+                                                mouse_map_kv[1] = .{ .key = .{ .string = "row" }, .value = .{ .unsigned = mouse.row } };
+                                                mouse_map_kv[2] = .{ .key = .{ .string = "button" }, .value = .{ .string = mouse.button } };
+                                                mouse_map_kv[3] = .{ .key = .{ .string = "event_type" }, .value = .{ .string = mouse.event_type } };
+                                                mouse_map_kv[4] = .{ .key = .{ .string = "shiftKey" }, .value = .{ .boolean = mouse.shift } };
+                                                mouse_map_kv[5] = .{ .key = .{ .string = "ctrlKey" }, .value = .{ .boolean = mouse.ctrl } };
+                                                mouse_map_kv[6] = .{ .key = .{ .string = "altKey" }, .value = .{ .boolean = mouse.alt } };
+
+                                                const mouse_map_val = msgpack.Value{ .map = mouse_map_kv };
+
+                                                var params = try self.allocator.alloc(msgpack.Value, 2);
+                                                params[0] = .{ .unsigned = @intCast(id) };
+                                                params[1] = mouse_map_val;
+
+                                                var arr = try self.allocator.alloc(msgpack.Value, 3);
+                                                arr[0] = .{ .unsigned = 2 }; // notification
+                                                arr[1] = .{ .string = "mouse_input" };
+                                                arr[2] = .{ .array = params };
+
+                                                const encoded_msg = try msgpack.encodeFromValue(self.allocator, .{ .array = arr });
+                                                defer self.allocator.free(encoded_msg);
+
+                                                // Clean up msgpack structures
+                                                self.allocator.free(arr);
+                                                self.allocator.free(params);
+                                                self.allocator.free(mouse_map_kv);
+
+                                                try self.sendDirect(encoded_msg);
+                                            }
+                                        }.appSendMouse,
                                     },
                                 }) catch |err| {
                                     std.log.err("Failed to update UI with pty_attach: {}", .{err});

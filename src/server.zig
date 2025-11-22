@@ -5,6 +5,7 @@ const msgpack = @import("msgpack.zig");
 const pty = @import("pty.zig");
 const key_parse = @import("key_parse.zig");
 const key_encode = @import("key_encode.zig");
+const mouse_encode = @import("mouse_encode.zig");
 const posix = std.posix;
 const ghostty_vt = @import("ghostty-vt");
 const vt_handler = @import("vt_handler.zig");
@@ -729,18 +730,17 @@ const Client = struct {
 
                             // Encode key using terminal state
                             var encode_buf: [32]u8 = undefined;
-                            var stream = std.io.fixedBufferStream(&encode_buf);
-                            const writer = stream.writer();
+                            var writer = std.Io.Writer.fixed(&encode_buf);
 
                             pty_instance.terminal_mutex.lock();
-                            key_encode.encode(writer, key, &pty_instance.terminal) catch |err| {
+                            key_encode.encode(&writer, key, &pty_instance.terminal) catch |err| {
                                 std.log.err("Failed to encode key: {}", .{err});
                                 pty_instance.terminal_mutex.unlock();
                                 return;
                             };
                             pty_instance.terminal_mutex.unlock();
 
-                            const encoded = stream.getWritten();
+                            const encoded = writer.buffered();
                             std.log.debug("Encoded key to {} bytes: {any}", .{ encoded.len, encoded });
 
                             if (encoded.len > 0) {
@@ -753,6 +753,51 @@ const Client = struct {
                         }
                     } else {
                         std.log.warn("key_input notification: invalid params", .{});
+                    }
+                } else if (std.mem.eql(u8, notif.method, "mouse_input")) {
+                    if (notif.params == .array and notif.params.array.len >= 2) {
+                        const session_id: usize = switch (notif.params.array[0]) {
+                            .unsigned => |u| @intCast(u),
+                            .integer => |i| @intCast(i),
+                            else => {
+                                std.log.warn("mouse_input notification: invalid session_id type", .{});
+                                return;
+                            },
+                        };
+                        const mouse_map = notif.params.array[1];
+
+                        if (self.server.ptys.get(session_id)) |pty_instance| {
+                            // Parse mouse map
+                            const mouse = key_parse.parseMouseMap(mouse_map) catch |err| {
+                                std.log.err("Failed to parse mouse map: {}", .{err});
+                                return;
+                            };
+
+                            // Encode mouse using terminal state
+                            var encode_buf: [32]u8 = undefined;
+                            var writer = std.Io.Writer.fixed(&encode_buf);
+
+                            pty_instance.terminal_mutex.lock();
+                            mouse_encode.encode(&writer, mouse, &pty_instance.terminal) catch |err| {
+                                std.log.err("Failed to encode mouse: {}", .{err});
+                                pty_instance.terminal_mutex.unlock();
+                                return;
+                            };
+                            pty_instance.terminal_mutex.unlock();
+
+                            const encoded = writer.buffered();
+                            // std.log.debug("Encoded mouse to {} bytes: {any}", .{ encoded.len, encoded });
+
+                            if (encoded.len > 0) {
+                                _ = posix.write(pty_instance.process.master, encoded) catch |err| {
+                                    std.log.err("Write to PTY failed: {}", .{err});
+                                };
+                            }
+                        } else {
+                            std.log.warn("mouse_input notification: session {} not found", .{session_id});
+                        }
+                    } else {
+                        std.log.warn("mouse_input notification: invalid params", .{});
                     }
                 } else if (std.mem.eql(u8, notif.method, "resize_pty")) {
                     if (notif.params == .array and notif.params.array.len >= 3) {

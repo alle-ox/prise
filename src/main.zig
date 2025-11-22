@@ -171,6 +171,9 @@ test {
     _ = @import("redraw.zig");
     _ = @import("Surface.zig");
     _ = @import("widget.zig");
+    _ = @import("key_encode.zig");
+    _ = @import("mouse_encode.zig");
+    _ = @import("vaxis_helper.zig");
 
     if (builtin.os.tag.isDarwin() or builtin.os.tag.isBSD()) {
         _ = @import("io/kqueue.zig");

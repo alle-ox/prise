@@ -17,6 +17,100 @@ const Mods = packed struct(u16) {
     _padding: u6 = 0,
 };
 
+pub const MouseButton = enum {
+    left,
+    middle,
+    right,
+    wheel_up,
+    wheel_down,
+    wheel_left,
+    wheel_right,
+    none,
+};
+
+pub const MouseEventType = enum {
+    press,
+    release,
+    motion,
+    drag,
+};
+
+pub const MouseEvent = struct {
+    col: u16,
+    row: u16,
+    button: MouseButton,
+    type: MouseEventType,
+    mods: Mods,
+};
+
+/// Parse mouse from msgpack map
+pub fn parseMouseMap(map: msgpack.Value) !MouseEvent {
+    if (map != .map) return error.InvalidMouseFormat;
+
+    var col: u16 = 0;
+    var row: u16 = 0;
+    var button: MouseButton = .none;
+    var type_: MouseEventType = .press;
+    var mods: Mods = .{};
+
+    for (map.map) |entry| {
+        if (entry.key != .string) continue;
+        const field = entry.key.string;
+
+        if (std.mem.eql(u8, field, "col")) {
+            if (entry.value == .unsigned) col = @intCast(entry.value.unsigned);
+        } else if (std.mem.eql(u8, field, "row")) {
+            if (entry.value == .unsigned) row = @intCast(entry.value.unsigned);
+        } else if (std.mem.eql(u8, field, "button")) {
+            if (entry.value == .string) {
+                const s = entry.value.string;
+                if (std.mem.eql(u8, s, "left")) {
+                    button = .left;
+                } else if (std.mem.eql(u8, s, "middle")) {
+                    button = .middle;
+                } else if (std.mem.eql(u8, s, "right")) {
+                    button = .right;
+                } else if (std.mem.eql(u8, s, "wheel_up")) {
+                    button = .wheel_up;
+                } else if (std.mem.eql(u8, s, "wheel_down")) {
+                    button = .wheel_down;
+                } else if (std.mem.eql(u8, s, "wheel_left")) {
+                    button = .wheel_left;
+                } else if (std.mem.eql(u8, s, "wheel_right")) {
+                    button = .wheel_right;
+                }
+            }
+        } else if (std.mem.eql(u8, field, "event_type")) {
+            if (entry.value == .string) {
+                const s = entry.value.string;
+                if (std.mem.eql(u8, s, "press")) {
+                    type_ = .press;
+                } else if (std.mem.eql(u8, s, "release")) {
+                    type_ = .release;
+                } else if (std.mem.eql(u8, s, "motion")) {
+                    type_ = .motion;
+                } else if (std.mem.eql(u8, s, "drag")) {
+                    type_ = .drag;
+                }
+            }
+        } else if (std.mem.eql(u8, field, "shiftKey")) {
+            if (entry.value == .boolean) mods.shift = entry.value.boolean;
+        } else if (std.mem.eql(u8, field, "ctrlKey")) {
+            if (entry.value == .boolean) mods.ctrl = entry.value.boolean;
+        } else if (std.mem.eql(u8, field, "altKey")) {
+            if (entry.value == .boolean) mods.alt = entry.value.boolean;
+        }
+    }
+
+    return .{
+        .col = col,
+        .row = row,
+        .button = button,
+        .type = type_,
+        .mods = mods,
+    };
+}
+
 /// Parse key from msgpack map to ghostty KeyEvent
 /// Expected format: { "key": "a", "shiftKey": false, "ctrlKey": false, "altKey": false, "metaKey": false }
 pub fn parseKeyMap(map: msgpack.Value) !KeyEvent {
