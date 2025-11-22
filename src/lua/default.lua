@@ -22,6 +22,8 @@ function M.update(event)
                 prise.request_frame()
             end)
         end
+    elseif event.type == "winsize" then
+        prise.request_frame()
     end
 end
 

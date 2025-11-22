@@ -101,6 +101,19 @@ pub fn applyRedraw(self: *Surface, params: msgpack.Value) !void {
             // Only resize if dimensions actually changed
             if (rows != self.rows or cols != self.cols) {
                 try self.resize(rows, cols);
+                // Resize will invalidate the screens, so we should expect a full redraw following this.
+                // But for now, we rely on the server sending full state if it resized.
+                // However, if the server sends resize + diff, we might have an issue if we cleared the screen.
+                // Surface.resize deallocates and reallocates, so content is lost.
+                // So we are assuming the server sends a full redraw after a resize.
+                //
+                // Wait, if we receive a resize event from the server, it means the PTY size changed.
+                // The server usually sends a full redraw when viewport changes significantly or flags are dirty.
+                //
+                // If we cleared the screen, we need to make sure we don't try to write to out of bounds
+                // if the following events assume old size (unlikely in same message).
+                //
+                // BUT, if we get a resize event, it's likely followed by write events filling the new size.
             }
         } else if (std.mem.eql(u8, event_name.string, "cursor_pos")) {
             if (event_params.array.len < 3) continue;

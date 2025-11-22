@@ -249,8 +249,11 @@ pub const ClientLogic = struct {
         for (params.array) |event_val| {
             if (event_val != .array or event_val.array.len < 1) continue;
             const event_name = event_val.array[0];
-            if (event_name == .string and std.mem.eql(u8, event_name.string, "flush")) {
-                return true;
+            switch (event_name) {
+                .string => |s| {
+                    if (std.mem.eql(u8, s, "flush")) return true;
+                },
+                else => {},
             }
         }
         return false;
@@ -650,8 +653,14 @@ pub const App = struct {
                     self.cell_width_px = if (ws.x_pixel > 0) ws.x_pixel / ws.cols else 0;
                     self.cell_height_px = if (ws.y_pixel > 0) ws.y_pixel / ws.rows else 0;
                 }
-                self.vx.state.in_band_resize = true;
-                try self.vx.resize(self.allocator, self.tty.writer(), ws);
+
+                if (ws.cols != self.vx.screen.width or ws.rows != self.vx.screen.height) {
+                    self.vx.state.in_band_resize = true;
+                    try self.vx.resize(self.allocator, self.tty.writer(), ws);
+
+                    // Schedule a render after resize to ensure UI matches new size
+                    try self.scheduleRender();
+                }
             },
             .cap_kitty_keyboard => {
                 std.log.info("kitty keyboard capability detected", .{});
@@ -760,7 +769,7 @@ pub const App = struct {
                 const should_flush = ClientLogic.shouldFlush(params);
                 std.log.debug("handleRedraw: params is array, shouldFlush={}", .{should_flush});
                 if (should_flush) {
-                    std.log.debug("handleRedraw: flush event received, rendering", .{});
+                    std.log.info("handleRedraw: flush event received, rendering", .{});
                     try self.scheduleRender();
                     return;
                 } else {
