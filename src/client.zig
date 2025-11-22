@@ -882,7 +882,7 @@ pub const App = struct {
                             std.log.err("Failed to send resize: {}", .{err});
                         };
                     }
-                    surface.render(win, w.show_cursor);
+                    surface.render(win, w.focus);
                 }
             },
             .text => |text| {

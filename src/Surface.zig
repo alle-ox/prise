@@ -354,8 +354,7 @@ pub fn applyRedraw(self: *Surface, params: msgpack.Value) !void {
     }
 }
 
-pub fn render(self: *Surface, win: vaxis.Window, show_cursor: bool) void {
-    var cells_written: usize = 0;
+pub fn render(self: *Surface, win: vaxis.Window, focused: bool) void {
     // Copy front buffer to vaxis window
     for (0..self.rows) |row| {
         for (0..self.cols) |col| {
@@ -363,13 +362,12 @@ pub fn render(self: *Surface, win: vaxis.Window, show_cursor: bool) void {
                 const cell = self.front.readCell(@intCast(col), @intCast(row)) orelse continue;
 
                 win.writeCell(@intCast(col), @intCast(row), cell);
-                cells_written += 1;
             }
         }
     }
 
-    // Copy cursor state to window only if show_cursor is true
-    if (show_cursor and
+    // Copy cursor state to window only if focused
+    if (focused and
         self.front.cursor_vis and
         self.front.cursor_col < win.width and
         self.front.cursor_row < win.height)
@@ -382,8 +380,8 @@ pub fn render(self: *Surface, win: vaxis.Window, show_cursor: bool) void {
             .underline => .underline,
         };
         win.setCursorShape(shape);
-    } else if (show_cursor) {
-        std.log.info("Surface.render: show_cursor=true but cursor hidden/OOB for pty {}", .{self.pty_id});
+    } else if (focused) {
+        std.log.info("Surface.render: focused=true but cursor hidden/OOB for pty {}", .{self.pty_id});
     }
 }
 

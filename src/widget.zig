@@ -21,7 +21,7 @@ pub const Widget = struct {
     width: u16 = 0,
     height: u16 = 0,
     flex: u8 = 0,
-    show_cursor: bool = false,
+    focus: bool = false,
     kind: WidgetKind,
 
     pub fn deinit(self: *Widget, allocator: std.mem.Allocator) void {
@@ -561,10 +561,17 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
     }
     lua.pop(1);
 
-    var show_cursor: bool = false;
-    _ = lua.getField(index, "show_cursor");
+    var focus: bool = false;
+    _ = lua.getField(index, "focus");
     if (lua.typeOf(-1) == .boolean) {
-        show_cursor = lua.toBoolean(-1);
+        focus = lua.toBoolean(-1);
+    } else {
+        // Legacy support for show_cursor
+        lua.pop(1);
+        _ = lua.getField(index, "show_cursor");
+        if (lua.typeOf(-1) == .boolean) {
+            focus = lua.toBoolean(-1);
+        }
     }
     lua.pop(1);
 
@@ -601,7 +608,7 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         };
         lua.pop(1);
 
-        return .{ .flex = actual_flex, .show_cursor = show_cursor, .kind = .{ .surface = .{ .pty_id = @intCast(pty_id) } } };
+        return .{ .flex = actual_flex, .focus = focus, .kind = .{ .surface = .{ .pty_id = @intCast(pty_id) } } };
     } else if (std.mem.eql(u8, widget_type, "column")) {
         _ = lua.getField(index, "children");
         if (lua.typeOf(-1) != .table) {
@@ -636,7 +643,7 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         }
         lua.pop(1);
 
-        return .{ .flex = flex, .show_cursor = show_cursor, .kind = .{ .column = .{
+        return .{ .flex = flex, .focus = focus, .kind = .{ .column = .{
             .children = try children.toOwnedSlice(allocator),
             .cross_axis_align = cross_align,
         } } };
@@ -674,7 +681,7 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         }
         lua.pop(1);
 
-        return .{ .flex = flex, .show_cursor = show_cursor, .kind = .{ .row = .{
+        return .{ .flex = flex, .focus = focus, .kind = .{ .row = .{
             .children = try children.toOwnedSlice(allocator),
             .cross_axis_align = cross_align,
         } } };
@@ -745,7 +752,7 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         }
         lua.pop(1);
 
-        return .{ .flex = flex, .show_cursor = show_cursor, .kind = .{ .text = .{
+        return .{ .flex = flex, .focus = focus, .kind = .{ .text = .{
             .spans = try spans.toOwnedSlice(allocator),
             .wrap = wrap,
             .@"align" = @"align",

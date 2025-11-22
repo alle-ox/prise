@@ -13,6 +13,7 @@ function M.update(event)
     if event.type == "pty_attach" then
         prise.log.info("Lua: pty_attach received")
         table.insert(state.ptys, event.data.pty)
+        state.focused_index = #state.ptys
         prise.log.info("Lua: pty count is " .. #state.ptys)
 
         -- If this is the first terminal, spawn another one
@@ -31,6 +32,9 @@ function M.update(event)
             elseif event.data.key == "l" then
                 state.focused_index = 2
                 handled = true
+            elseif event.data.key == "%" then
+                prise.spawn({})
+                handled = true
             end
 
             if handled then
@@ -40,10 +44,7 @@ function M.update(event)
                 return
             end
 
-            -- Consume other keys and exit command mode
-            state.pending_command = false
-            state.status_bg = "white"
-            prise.request_frame()
+            -- Swallow other keys but keep command mode active (until timeout)
             return
         end
 

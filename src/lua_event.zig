@@ -87,7 +87,10 @@ pub fn pushEvent(lua: *ziglua.Lua, event: Event) !void {
 
                 lua.createTable(0, 5);
 
-                if (key.codepoint != 0) {
+                if (key.text) |text| {
+                    _ = lua.pushString(text);
+                    lua.setField(-2, "key");
+                } else if (key.codepoint != 0) {
                     var buf: [5]u8 = undefined; // Increased size for null terminator
                     const len = std.unicode.utf8Encode(key.codepoint, buf[0..4]) catch 0;
                     if (len > 0) {
