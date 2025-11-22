@@ -24,6 +24,10 @@ const Pty = struct {
     title: std.ArrayList(u8),
     title_dirty: bool = false,
 
+    // Exit state
+    exited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    exit_status: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+
     // Synchronization for terminal access
     terminal_mutex: std.Thread.Mutex = .{},
     // Dirty signaling
@@ -176,6 +180,20 @@ const Pty = struct {
         // Reap the child process
         const result = posix.waitpid(self.process.pid, 0);
         std.log.info("Session {} PTY process {} exited with status {}", .{ self.id, self.process.pid, result.status });
+
+        self.exit_status.store(result.status, .seq_cst);
+        self.exited.store(true, .seq_cst);
+
+        // Signal main thread about exit
+        while (true) {
+            _ = posix.write(self.pipe_fds[1], "e") catch |err| {
+                if (err == error.WouldBlock) {
+                    std.Thread.sleep(1 * std.time.ns_per_ms);
+                    continue;
+                }
+            };
+            break;
+        }
     }
 };
 
@@ -1432,6 +1450,20 @@ const Server = struct {
         pty_instance.last_render_time = std.time.milliTimestamp();
     }
 
+    /// Build and send pty_exited notification to all clients
+    fn sendPtyExited(self: *Server, pty_id: usize, exit_status: u32) !void {
+        const params = .{ pty_id, exit_status };
+        const msg_bytes = try msgpack.encode(self.allocator, .{ 2, "pty_exited", params });
+        defer self.allocator.free(msg_bytes);
+
+        std.log.info("Sending pty_exited for session {} status {}", .{ pty_id, exit_status });
+
+        // Send to all clients
+        for (self.clients.items) |client| {
+            try client.sendData(self.loop, msg_bytes);
+        }
+    }
+
     fn onRenderTimer(loop: *io.Loop, completion: io.Completion) anyerror!void {
         _ = loop;
         const pty_instance = completion.userdataCast(Pty);
@@ -1455,6 +1487,17 @@ const Server = struct {
                         if (err == error.WouldBlock) break;
                         break;
                     };
+                }
+
+                // Check if exited
+                if (pty_instance.exited.load(.acquire)) {
+                    const status = pty_instance.exit_status.load(.acquire);
+                    server.sendPtyExited(pty_instance.id, status) catch |err| {
+                        std.log.err("Failed to send pty_exited: {}", .{err});
+                    };
+                    // Render final frame
+                    server.renderFrame(pty_instance);
+                    return;
                 }
 
                 const now = std.time.milliTimestamp();
@@ -2007,4 +2050,113 @@ test "ScreenState style optimization" {
     try testing.expectEqual(red_style_id, d_style_id);
     // And definitely not the default style ID
     try testing.expect(d_style_id != style_default_id);
+}
+
+test "server - pty exit notification" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var loop = try io.Loop.init(allocator);
+    defer loop.deinit();
+
+    var server: Server = .{
+        .allocator = allocator,
+        .loop = &loop,
+        .listen_fd = 100,
+        .socket_path = "/tmp/test.sock",
+        .clients = std.ArrayList(*Client).empty,
+        .ptys = std.AutoHashMap(usize, *Pty).init(allocator),
+    };
+    defer {
+        // cleanup
+        for (server.clients.items) |client| {
+            if (client.send_buffer) |buf| allocator.free(buf);
+            for (client.send_queue.items) |buf| allocator.free(buf);
+            client.send_queue.deinit(allocator);
+            client.attached_sessions.deinit(allocator);
+            allocator.destroy(client);
+        }
+        server.clients.deinit(allocator);
+        // pty cleanup is manual here since we don't use full server lifecycle
+        var it = server.ptys.valueIterator();
+        while (it.next()) |p| {
+            // Manually cleanup pty resources
+            posix.close(p.*.pipe_fds[0]);
+            posix.close(p.*.pipe_fds[1]);
+            p.*.terminal.deinit(allocator);
+            p.*.clients.deinit(allocator);
+            p.*.title.deinit(allocator);
+            allocator.destroy(p.*);
+        }
+        server.ptys.deinit();
+    }
+
+    // Add a client
+    const client = try allocator.create(Client);
+    client.* = .{
+        .fd = 200,
+        .server = &server,
+        .send_queue = std.ArrayList([]u8).empty,
+        .attached_sessions = std.ArrayList(usize).empty,
+    };
+    try server.clients.append(allocator, client);
+
+    // Create a dummy Pty
+    const pipe_fds = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
+    const pty_inst = try allocator.create(Pty);
+    pty_inst.* = .{
+        .id = 1,
+        .process = .{ .master = -1, .slave = -1, .pid = 0 },
+        .clients = std.ArrayList(*Client).empty,
+        .running = std.atomic.Value(bool).init(true),
+        .terminal = try ghostty_vt.Terminal.init(allocator, .{ .cols = 80, .rows = 24 }),
+        .allocator = allocator,
+        .title = std.ArrayList(u8).empty,
+        .title_dirty = false,
+        .pipe_fds = pipe_fds,
+        .server_ptr = &server,
+        .exited = std.atomic.Value(bool).init(false),
+        .exit_status = std.atomic.Value(u32).init(0),
+    };
+
+    try server.ptys.put(1, pty_inst);
+
+    // Register dirty signal pipe (like in spawn_pty)
+    _ = try loop.read(pty_inst.pipe_fds[0], &pty_inst.dirty_signal_buf, .{
+        .ptr = pty_inst,
+        .cb = Server.onPtyDirty,
+    });
+
+    // Simulate exit
+    pty_inst.exited.store(true, .seq_cst);
+    pty_inst.exit_status.store(123, .seq_cst);
+
+    // Write to pipe so posix.read finds something
+    _ = try posix.write(pipe_fds[1], "e");
+
+    // Trigger mock completion
+    try loop.completeRead(pipe_fds[0], "e");
+
+    // Run loop to process onPtyDirty
+    try loop.run(.once);
+
+    // Check pending sends
+    var found_send = false;
+    var it = loop.pending.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.kind == .send and entry.value_ptr.fd == 200) {
+            found_send = true;
+
+            // Verify content
+            const msg = try rpc.decodeMessage(allocator, entry.value_ptr.buf);
+            defer msg.deinit(allocator);
+
+            try testing.expect(msg == .notification);
+            try testing.expectEqualStrings("pty_exited", msg.notification.method);
+            try testing.expectEqual(@as(usize, 2), msg.notification.params.array.len);
+            try testing.expectEqual(@as(u64, 1), msg.notification.params.array[0].unsigned);
+            try testing.expectEqual(@as(u64, 123), msg.notification.params.array[1].unsigned);
+        }
+    }
+    try testing.expect(found_send);
 }
