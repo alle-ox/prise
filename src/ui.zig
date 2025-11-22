@@ -13,8 +13,48 @@ const default_ui = @embedFile("lua/default.lua");
 
 const TimerContext = struct {
     ui: *UI,
-    ref: i32,
+    timer_ref: i32,
 };
+
+const Timer = struct {
+    ui: *UI,
+    callback_ref: i32,
+    task_id: usize,
+    timer_ctx: ?*TimerContext,
+    fired: bool,
+};
+
+fn timerCancel(lua: *ziglua.Lua) i32 {
+    const timer = lua.checkUserdata(Timer, 1, "PriseTimer");
+    if (timer.fired) return 0;
+
+    if (timer.timer_ctx) |ctx| {
+        if (timer.ui.loop) |loop| {
+            loop.cancel(timer.task_id) catch {};
+        }
+
+        // Unref callback and timer
+        timer.ui.lua.unref(ziglua.registry_index, timer.callback_ref);
+        timer.ui.lua.unref(ziglua.registry_index, ctx.timer_ref);
+
+        timer.ui.allocator.destroy(ctx);
+        timer.timer_ctx = null;
+    }
+
+    timer.fired = true;
+    return 0;
+}
+
+fn registerTimerMetatable(lua: *ziglua.Lua) void {
+    lua.newMetatable("PriseTimer") catch return;
+    _ = lua.pushString("__index");
+    lua.createTable(0, 1);
+    _ = lua.pushString("cancel");
+    lua.pushFunction(ziglua.wrap(timerCancel));
+    lua.setTable(-3);
+    lua.setTable(-3);
+    lua.pop(1);
+}
 
 pub const UI = struct {
     allocator: std.mem.Allocator,
@@ -154,6 +194,8 @@ pub const UI = struct {
 
         lua.setField(-2, "log");
 
+        registerTimerMetatable(lua);
+
         return 1;
     }
 
@@ -253,27 +295,54 @@ pub const UI = struct {
 
         // Create reference to callback
         lua.pushValue(2);
-        const ref = lua.ref(ziglua.registry_index) catch {
+        const callback_ref = lua.ref(ziglua.registry_index) catch {
             lua.raiseErrorStr("Failed to create reference", .{});
         };
 
+        // Create Timer userdata
+        const timer = lua.newUserdata(Timer, @sizeOf(Timer));
+        timer.* = .{
+            .ui = ui,
+            .callback_ref = callback_ref,
+            .task_id = 0, // set later
+            .timer_ctx = null, // set later
+            .fired = false,
+        };
+
+        // Set metatable
+        _ = lua.getMetatableRegistry("PriseTimer");
+        lua.setMetatable(-2);
+
+        // Create reference to Timer userdata (it is at -1)
+        lua.pushValue(-1);
+        const timer_ref = lua.ref(ziglua.registry_index) catch {
+            // Cleanup
+            lua.unref(ziglua.registry_index, callback_ref);
+            lua.raiseErrorStr("Failed to create timer ref", .{});
+        };
+
         const ctx = ui.allocator.create(TimerContext) catch {
-            lua.unref(ziglua.registry_index, ref);
+            lua.unref(ziglua.registry_index, callback_ref);
+            lua.unref(ziglua.registry_index, timer_ref);
             lua.raiseErrorStr("Out of memory", .{});
         };
-        ctx.* = .{ .ui = ui, .ref = ref };
+        ctx.* = .{ .ui = ui, .timer_ref = timer_ref };
+        timer.timer_ctx = ctx;
 
         const ns = @as(u64, @intCast(ms)) * std.time.ns_per_ms;
-        _ = ui.loop.?.timeout(ns, .{
+        const task = ui.loop.?.timeout(ns, .{
             .ptr = ctx,
             .cb = onTimeout,
         }) catch {
             ui.allocator.destroy(ctx);
-            lua.unref(ziglua.registry_index, ref);
+            lua.unref(ziglua.registry_index, callback_ref);
+            lua.unref(ziglua.registry_index, timer_ref);
             lua.raiseErrorStr("Failed to schedule timeout", .{});
         };
 
-        return 0;
+        timer.task_id = task.id;
+
+        return 1;
     }
 
     fn quit(lua: *ziglua.Lua) i32 {
@@ -293,16 +362,27 @@ pub const UI = struct {
     fn onTimeout(loop: *io.Loop, completion: io.Completion) !void {
         _ = loop;
         const ctx = completion.userdataCast(TimerContext);
-        defer ctx.ui.allocator.destroy(ctx);
-        defer ctx.ui.lua.unref(ziglua.registry_index, ctx.ref);
+
+        // Get Timer userdata
+        _ = ctx.ui.lua.rawGetIndex(ziglua.registry_index, ctx.timer_ref);
+        const timer = ctx.ui.lua.toUserdata(Timer, -1) catch unreachable;
+        ctx.ui.lua.pop(1);
+
+        timer.fired = true;
+        timer.timer_ctx = null;
 
         // Get callback
-        _ = ctx.ui.lua.rawGetIndex(ziglua.registry_index, ctx.ref);
+        _ = ctx.ui.lua.rawGetIndex(ziglua.registry_index, timer.callback_ref);
         ctx.ui.lua.protectedCall(.{ .args = 0, .results = 0, .msg_handler = 0 }) catch {
             const err = ctx.ui.lua.toString(-1) catch "Unknown error";
             std.log.err("Lua timeout callback error: {s}", .{err});
             ctx.ui.lua.pop(1);
         };
+
+        // Cleanup
+        ctx.ui.lua.unref(ziglua.registry_index, timer.callback_ref);
+        ctx.ui.lua.unref(ziglua.registry_index, ctx.timer_ref);
+        ctx.ui.allocator.destroy(ctx);
     }
 
     pub fn deinit(self: *UI) void {
