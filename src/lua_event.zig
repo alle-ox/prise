@@ -12,6 +12,10 @@ pub const Event = union(enum) {
         app: *anyopaque,
         send_fn: *const fn (app: *anyopaque, id: u32, key: KeyData) anyerror!void,
     },
+    pty_exited: struct {
+        id: u32,
+        status: u32,
+    },
     init: void,
 };
 
@@ -62,6 +66,18 @@ pub fn pushEvent(lua: *ziglua.Lua, event: Event) !void {
 
             lua.setField(-2, "data");
             std.log.info("pushEvent: pty_attach done", .{});
+        },
+
+        .pty_exited => |info| {
+            _ = lua.pushString("pty_exited");
+            lua.setField(-2, "type");
+
+            lua.createTable(0, 2);
+            lua.pushInteger(@intCast(info.id));
+            lua.setField(-2, "id");
+            lua.pushInteger(@intCast(info.status));
+            lua.setField(-2, "status");
+            lua.setField(-2, "data");
         },
 
         .vaxis => |vaxis_event| switch (vaxis_event) {

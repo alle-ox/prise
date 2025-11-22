@@ -159,6 +159,7 @@ pub const ServerAction = union(enum) {
     send_attach: i64,
     redraw: msgpack.Value,
     attached: i64,
+    pty_exited: struct { pty_id: u32, status: u32 },
 };
 
 pub const PipeAction = union(enum) {
@@ -245,6 +246,20 @@ pub const ClientLogic = struct {
             .notification => |notif| {
                 if (std.mem.eql(u8, notif.method, "redraw")) {
                     return ServerAction{ .redraw = notif.params };
+                } else if (std.mem.eql(u8, notif.method, "pty_exited")) {
+                    if (notif.params == .array and notif.params.array.len >= 2) {
+                        const pty_id = switch (notif.params.array[0]) {
+                            .integer => |i| @as(u32, @intCast(i)),
+                            .unsigned => |u| @as(u32, @intCast(u)),
+                            else => 0,
+                        };
+                        const status = switch (notif.params.array[1]) {
+                            .integer => |i| @as(u32, @intCast(i)),
+                            .unsigned => |u| @as(u32, @intCast(u)),
+                            else => 0,
+                        };
+                        return ServerAction{ .pty_exited = .{ .pty_id = pty_id, .status = status } };
+                    }
                 }
             },
         }
@@ -1220,6 +1235,12 @@ pub const App = struct {
                                 defer app.allocator.free(resize_msg);
                                 try app.sendDirect(resize_msg);
                             }
+                        },
+                        .pty_exited => |info| {
+                            std.log.info("PTY {} exited with status {}", .{ info.pty_id, info.status });
+                            app.ui.update(.{ .pty_exited = .{ .id = info.pty_id, .status = info.status } }) catch |err| {
+                                std.log.err("Failed to update UI with pty_exited: {}", .{err});
+                            };
                         },
                         .none => {},
                     }

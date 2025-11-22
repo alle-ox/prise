@@ -76,6 +76,23 @@ function M.update(event)
             end
             prise.request_frame()
         end
+    elseif event.type == "pty_exited" then
+        prise.log.info("Lua: pty_exited received for id " .. event.data.id)
+        for i, pty in ipairs(state.ptys) do
+            if pty:id() == event.data.id then
+                table.remove(state.ptys, i)
+                if state.focused_index >= i and state.focused_index > 1 then
+                    state.focused_index = state.focused_index - 1
+                end
+                break
+            end
+        end
+
+        if #state.ptys == 0 then
+            prise.log.info("Lua: All ptys exited, quitting")
+            prise.quit()
+        end
+        prise.request_frame()
     elseif event.type == "winsize" then
         prise.request_frame()
     end
