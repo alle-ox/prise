@@ -349,7 +349,9 @@ pub const ClientLogic = struct {
 
     pub fn encodeEvent(allocator: std.mem.Allocator, event: vaxis.Event) !?[]u8 {
         switch (event) {
-            .key_press => |key| {
+            .key_press, .key_release => |key| {
+                const event_name: []const u8 = if (event == .key_press) "key" else "key_release";
+
                 // Build key map in W3C KeyboardEvent format
                 const key_strs = try vaxis_helper.vaxisKeyToStrings(allocator, key);
                 defer allocator.free(key_strs.key);
@@ -365,7 +367,7 @@ pub const ClientLogic = struct {
 
                 const key_map_val = msgpack.Value{ .map = key_map_kv };
                 var arr = try allocator.alloc(msgpack.Value, 2);
-                arr[0] = .{ .string = "key" };
+                arr[0] = .{ .string = event_name };
                 arr[1] = key_map_val;
 
                 const result = try msgpack.encodeFromValue(allocator, msgpack.Value{ .array = arr });
@@ -480,7 +482,11 @@ pub const App = struct {
     pub fn init(allocator: std.mem.Allocator) !App {
         var app: App = .{
             .allocator = allocator,
-            .vx = try vaxis.init(allocator, .{}),
+            .vx = try vaxis.init(allocator, .{
+                .kitty_keyboard_flags = .{
+                    .report_events = true,
+                },
+            }),
             .tty = undefined,
             .tty_buffer = undefined,
             .msg_buffer = .empty,
@@ -1510,9 +1516,11 @@ pub const App = struct {
                                                         params[0] = .{ .unsigned = @intCast(id) };
                                                         params[1] = key_map_val;
 
+                                                        const method: []const u8 = if (key.release) "key_release" else "key_input";
+
                                                         var arr = try self.allocator.alloc(msgpack.Value, 3);
                                                         arr[0] = .{ .unsigned = 2 }; // notification
-                                                        arr[1] = .{ .string = "key_input" };
+                                                        arr[1] = .{ .string = method };
                                                         arr[2] = .{ .array = params };
 
                                                         const encoded_msg = try msgpack.encodeFromValue(self.allocator, .{ .array = arr });
@@ -1805,9 +1813,11 @@ pub const App = struct {
                     params[0] = .{ .unsigned = @intCast(pty_id) };
                     params[1] = key_map_val;
 
+                    const method: []const u8 = if (key.release) "key_release" else "key_input";
+
                     var arr = try app.allocator.alloc(msgpack.Value, 3);
                     arr[0] = .{ .unsigned = 2 };
-                    arr[1] = .{ .string = "key_input" };
+                    arr[1] = .{ .string = method };
                     arr[2] = .{ .array = params };
 
                     const encoded_msg = try msgpack.encodeFromValue(app.allocator, .{ .array = arr });

@@ -47,6 +47,7 @@ pub const KeyData = struct {
     alt: bool,
     shift: bool,
     super: bool,
+    release: bool = false,
 };
 
 pub const MouseData = struct {
@@ -192,8 +193,12 @@ pub fn pushEvent(lua: *ziglua.Lua, event: Event) !void {
         },
 
         .vaxis => |vaxis_event| switch (vaxis_event) {
-            .key_press => |key| {
-                _ = lua.pushString("key_press");
+            .key_press, .key_release => |key| {
+                if (vaxis_event == .key_press) {
+                    _ = lua.pushString("key_press");
+                } else {
+                    _ = lua.pushString("key_release");
+                }
                 lua.setField(-2, "type");
 
                 lua.createTable(0, 6);
@@ -370,6 +375,9 @@ fn ptySendKey(lua: *ziglua.Lua) i32 {
     _ = lua.getField(2, "super");
     const super = lua.toBoolean(-1);
 
+    _ = lua.getField(2, "release");
+    const release = lua.toBoolean(-1);
+
     const key = KeyData{
         .key = key_str,
         .code = code_str,
@@ -377,15 +385,16 @@ fn ptySendKey(lua: *ziglua.Lua) i32 {
         .alt = alt,
         .shift = shift,
         .super = super,
+        .release = release,
     };
 
     pty.send_key_fn(pty.app, pty.id, key) catch |err| {
         // Clean up stack before error
-        lua.pop(6);
+        lua.pop(7);
         lua.raiseErrorStr("Failed to send key: %s", .{@errorName(err).ptr});
     };
 
-    lua.pop(6);
+    lua.pop(7);
     return 0;
 }
 

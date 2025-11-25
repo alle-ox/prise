@@ -505,6 +505,17 @@ function M.update(event)
                 pane.pty:send_key(event.data)
             end
         end
+    elseif event.type == "key_release" then
+        -- Forward all key releases to focused PTY
+        if state.root and state.focused_id then
+            local path = find_node_path(state.root, state.focused_id)
+            if path then
+                local pane = path[#path]
+                local data = event.data
+                data.release = true
+                pane.pty:send_key(data)
+            end
+        end
     elseif event.type == "pty_exited" then
         local id = event.data.id
         prise.log.info("Lua: pty_exited " .. id)

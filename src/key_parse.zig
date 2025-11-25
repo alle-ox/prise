@@ -124,6 +124,10 @@ pub fn parseMouseMap(map: msgpack.Value) !MouseEvent {
 /// Parse key from msgpack map to ghostty KeyEvent
 /// Expected format: { "key": "a", "code": "KeyA", "shiftKey": false, "ctrlKey": false, "altKey": false, "metaKey": false }
 pub fn parseKeyMap(map: msgpack.Value) !KeyEvent {
+    return parseKeyMapWithAction(map, .press);
+}
+
+pub fn parseKeyMapWithAction(map: msgpack.Value, action: ghostty.input.KeyAction) !KeyEvent {
     if (map != .map) return error.InvalidKeyFormat;
 
     var key_str: ?[]const u8 = null; // W3C "key" - produced character
@@ -192,6 +196,7 @@ pub fn parseKeyMap(map: msgpack.Value) !KeyEvent {
         utf8_codepoint != 0 and unshifted_codepoint != utf8_codepoint;
 
     return .{
+        .action = action,
         .key = key_enum,
         .utf8 = utf8,
         .mods = @bitCast(mods),

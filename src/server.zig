@@ -729,7 +729,8 @@ const Client = struct {
                     } else {
                         std.log.warn("write_pty notification: invalid params", .{});
                     }
-                } else if (std.mem.eql(u8, notif.method, "key_input")) {
+                } else if (std.mem.eql(u8, notif.method, "key_input") or std.mem.eql(u8, notif.method, "key_release")) {
+                    const is_release = std.mem.eql(u8, notif.method, "key_release");
                     if (notif.params == .array and notif.params.array.len >= 2) {
                         const pty_id: usize = switch (notif.params.array[0]) {
                             .unsigned => |u| @intCast(u),
@@ -742,7 +743,8 @@ const Client = struct {
                         const key_map = notif.params.array[1];
 
                         if (self.server.ptys.get(pty_id)) |pty_instance| {
-                            const key = key_parse.parseKeyMap(key_map) catch |err| {
+                            const action: ghostty_vt.input.KeyAction = if (is_release) .release else .press;
+                            const key = key_parse.parseKeyMapWithAction(key_map, action) catch |err| {
                                 std.log.err("Failed to parse key map: {}", .{err});
                                 return;
                             };
