@@ -79,4 +79,33 @@ function M.Row(opts)
     }
 end
 
+function M.Stack(opts)
+    -- If opts is an array (has numeric keys), it's just the children
+    if opts[1] then
+        return {
+            type = "stack",
+            children = opts,
+        }
+    end
+
+    return {
+        type = "stack",
+        children = opts.children or {},
+        ratio = opts.ratio,
+        id = opts.id,
+    }
+end
+
+function M.Positioned(opts)
+    return {
+        type = "positioned",
+        child = opts.child or opts[1],
+        x = opts.x,
+        y = opts.y,
+        anchor = opts.anchor,
+        ratio = opts.ratio,
+        id = opts.id,
+    }
+end
+
 return M

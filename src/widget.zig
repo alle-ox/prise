@@ -101,6 +101,16 @@ pub const Widget = struct {
                 }
                 allocator.free(r.children);
             },
+            .stack => |*s| {
+                for (s.children) |*child| {
+                    child.deinit(allocator);
+                }
+                allocator.free(s.children);
+            },
+            .positioned => |*p| {
+                p.child.deinit(allocator);
+                allocator.destroy(p.child);
+            },
         }
     }
 
@@ -344,6 +354,48 @@ pub const Widget = struct {
                     .height = height,
                 };
             },
+            .stack => |*stack| blk: {
+                var max_width: u16 = 0;
+                var max_height: u16 = 0;
+
+                for (stack.children) |*child| {
+                    const child_size = child.layout(constraints);
+                    child.x = 0;
+                    child.y = 0;
+                    if (child_size.width > max_width) max_width = child_size.width;
+                    if (child_size.height > max_height) max_height = child_size.height;
+                }
+
+                break :blk Size{
+                    .width = max_width,
+                    .height = max_height,
+                };
+            },
+            .positioned => |*pos| blk: {
+                const child_size = pos.child.layout(constraints);
+
+                const container_width = constraints.max_width orelse child_size.width;
+                const container_height = constraints.max_height orelse child_size.height;
+
+                const anchor_x: u16 = switch (pos.anchor) {
+                    .top_left, .center_left, .bottom_left => 0,
+                    .top_center, .center, .bottom_center => if (container_width > child_size.width) (container_width - child_size.width) / 2 else 0,
+                    .top_right, .center_right, .bottom_right => if (container_width > child_size.width) container_width - child_size.width else 0,
+                };
+                const anchor_y: u16 = switch (pos.anchor) {
+                    .top_left, .top_center, .top_right => 0,
+                    .center_left, .center, .center_right => if (container_height > child_size.height) (container_height - child_size.height) / 2 else 0,
+                    .bottom_left, .bottom_center, .bottom_right => if (container_height > child_size.height) container_height - child_size.height else 0,
+                };
+
+                pos.child.x = pos.x orelse anchor_x;
+                pos.child.y = pos.y orelse anchor_y;
+
+                break :blk Size{
+                    .width = child_size.width,
+                    .height = child_size.height,
+                };
+            },
         };
         self.width = size.width;
         self.height = size.height;
@@ -366,6 +418,14 @@ pub const Widget = struct {
                 for (row.children) |*child| {
                     try child.paint();
                 }
+            },
+            .stack => |*stack| {
+                for (stack.children) |*child| {
+                    try child.paint();
+                }
+            },
+            .positioned => |*pos| {
+                try pos.child.paint();
             },
         }
     }
@@ -404,6 +464,14 @@ pub const Widget = struct {
                 }
             },
             .text => {},
+            .stack => |stack| {
+                for (stack.children) |*child| {
+                    try child.collectHitRegionsRecursive(allocator, regions, abs_x, abs_y);
+                }
+            },
+            .positioned => |pos| {
+                try pos.child.collectHitRegionsRecursive(allocator, regions, abs_x, abs_y);
+            },
         }
     }
 
@@ -465,6 +533,14 @@ pub const Widget = struct {
                     }
                 }
             },
+            .stack => |stack| {
+                for (stack.children) |*child| {
+                    try child.collectSplitHandlesRecursive(allocator, handles, abs_x, abs_y);
+                }
+            },
+            .positioned => |pos| {
+                try pos.child.collectSplitHandlesRecursive(allocator, handles, abs_x, abs_y);
+            },
         }
     }
 };
@@ -505,6 +581,8 @@ pub const WidgetKind = union(enum) {
     text: Text,
     column: Column,
     row: Row,
+    stack: Stack,
+    positioned: Positioned,
 };
 
 pub const CrossAxisAlignment = enum {
@@ -522,6 +600,29 @@ pub const Column = struct {
 pub const Row = struct {
     children: []Widget,
     cross_axis_align: CrossAxisAlignment = .center,
+};
+
+pub const Stack = struct {
+    children: []Widget,
+};
+
+pub const Anchor = enum {
+    top_left,
+    top_center,
+    top_right,
+    center_left,
+    center,
+    center_right,
+    bottom_left,
+    bottom_center,
+    bottom_right,
+};
+
+pub const Positioned = struct {
+    child: *Widget,
+    x: ?u16 = null,
+    y: ?u16 = null,
+    anchor: Anchor = .top_left,
 };
 
 pub const Surface = struct {
@@ -904,6 +1005,79 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
             .wrap = wrap,
             .@"align" = @"align",
         } } };
+    } else if (std.mem.eql(u8, widget_type, "stack")) {
+        _ = lua.getField(index, "children");
+        if (lua.typeOf(-1) != .table) {
+            lua.pop(1);
+            return error.MissingStackChildren;
+        }
+
+        var children = std.ArrayList(Widget).empty;
+        errdefer {
+            for (children.items) |*c| c.deinit(allocator);
+            children.deinit(allocator);
+        }
+
+        const len = lua.rawLen(-1);
+        for (1..len + 1) |i| {
+            _ = lua.getIndex(-1, @intCast(i));
+            const child = try parseWidget(lua, allocator, -1);
+            try children.append(allocator, child);
+            lua.pop(1);
+        }
+        lua.pop(1); // children
+
+        return .{ .ratio = ratio, .id = id, .focus = focus, .kind = .{ .stack = .{
+            .children = try children.toOwnedSlice(allocator),
+        } } };
+    } else if (std.mem.eql(u8, widget_type, "positioned")) {
+        _ = lua.getField(index, "child");
+        if (lua.typeOf(-1) != .table) {
+            lua.pop(1);
+            return error.MissingPositionedChild;
+        }
+
+        const child_ptr = try allocator.create(Widget);
+        errdefer allocator.destroy(child_ptr);
+        child_ptr.* = try parseWidget(lua, allocator, -1);
+        lua.pop(1);
+
+        var x: ?u16 = null;
+        _ = lua.getField(index, "x");
+        if (lua.typeOf(-1) == .number) {
+            x = @intCast(lua.toInteger(-1) catch 0);
+        }
+        lua.pop(1);
+
+        var y: ?u16 = null;
+        _ = lua.getField(index, "y");
+        if (lua.typeOf(-1) == .number) {
+            y = @intCast(lua.toInteger(-1) catch 0);
+        }
+        lua.pop(1);
+
+        var anchor: Anchor = .top_left;
+        _ = lua.getField(index, "anchor");
+        if (lua.typeOf(-1) == .string) {
+            const s = try lua.toString(-1);
+            if (std.mem.eql(u8, s, "top_left")) anchor = .top_left;
+            if (std.mem.eql(u8, s, "top_center")) anchor = .top_center;
+            if (std.mem.eql(u8, s, "top_right")) anchor = .top_right;
+            if (std.mem.eql(u8, s, "center_left")) anchor = .center_left;
+            if (std.mem.eql(u8, s, "center")) anchor = .center;
+            if (std.mem.eql(u8, s, "center_right")) anchor = .center_right;
+            if (std.mem.eql(u8, s, "bottom_left")) anchor = .bottom_left;
+            if (std.mem.eql(u8, s, "bottom_center")) anchor = .bottom_center;
+            if (std.mem.eql(u8, s, "bottom_right")) anchor = .bottom_right;
+        }
+        lua.pop(1);
+
+        return .{ .ratio = ratio, .id = id, .focus = focus, .kind = .{ .positioned = .{
+            .child = child_ptr,
+            .x = x,
+            .y = y,
+            .anchor = anchor,
+        } } };
     }
 
     return error.UnknownWidgetType;
@@ -1234,4 +1408,173 @@ test "Text Iterator" {
     defer allocator.free(l_nowrap.segments);
     try testing.expectEqualStrings("Hello World", l_nowrap.segments[0].text);
     try testing.expect((try iter_nowrap.next()) == null);
+}
+
+test "Stack Layout" {
+    const testing = std.testing;
+
+    const child1 = Widget{
+        .kind = .{ .surface = .{ .pty_id = 1 } },
+    };
+
+    const child2 = Widget{
+        .kind = .{ .surface = .{ .pty_id = 2 } },
+    };
+
+    var children = [_]Widget{ child1, child2 };
+    var stack = Widget{
+        .kind = .{ .stack = .{ .children = &children } },
+    };
+
+    const constraints: BoxConstraints = .{
+        .min_width = 0,
+        .max_width = 80,
+        .min_height = 0,
+        .max_height = 24,
+    };
+
+    const size = stack.layout(constraints);
+
+    try testing.expectEqual(@as(u16, 80), size.width);
+    try testing.expectEqual(@as(u16, 24), size.height);
+
+    try testing.expectEqual(@as(u16, 0), children[0].x);
+    try testing.expectEqual(@as(u16, 0), children[0].y);
+    try testing.expectEqual(@as(u16, 0), children[1].x);
+    try testing.expectEqual(@as(u16, 0), children[1].y);
+}
+
+test "Positioned Layout - explicit position" {
+    const testing = std.testing;
+
+    var child = Widget{
+        .kind = .{ .surface = .{ .pty_id = 1 } },
+    };
+
+    var pos = Widget{
+        .kind = .{ .positioned = .{
+            .child = &child,
+            .x = 10,
+            .y = 5,
+            .anchor = .top_left,
+        } },
+    };
+
+    const constraints: BoxConstraints = .{
+        .min_width = 0,
+        .max_width = 80,
+        .min_height = 0,
+        .max_height = 24,
+    };
+
+    _ = pos.layout(constraints);
+
+    try testing.expectEqual(@as(u16, 10), child.x);
+    try testing.expectEqual(@as(u16, 5), child.y);
+}
+
+test "Positioned Layout - center anchor" {
+    const testing = std.testing;
+
+    const span = Text.Span{ .text = "Hello", .style = .{} };
+    var spans = [_]Text.Span{span};
+    var child = Widget{
+        .kind = .{ .text = .{ .spans = &spans } },
+    };
+
+    var pos = Widget{
+        .kind = .{ .positioned = .{
+            .child = &child,
+            .x = null,
+            .y = null,
+            .anchor = .center,
+        } },
+    };
+
+    const constraints: BoxConstraints = .{
+        .min_width = 0,
+        .max_width = 80,
+        .min_height = 0,
+        .max_height = 24,
+    };
+
+    _ = pos.layout(constraints);
+
+    try testing.expectEqual(@as(u16, 37), child.x);
+    try testing.expectEqual(@as(u16, 11), child.y);
+}
+
+test "parseWidget - stack" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var lua = try ziglua.Lua.init(allocator);
+    defer lua.deinit();
+
+    lua.createTable(0, 2);
+    _ = lua.pushString("stack");
+    lua.setField(-2, "type");
+
+    lua.createTable(2, 0);
+
+    lua.createTable(0, 2);
+    _ = lua.pushString("text");
+    lua.setField(-2, "type");
+    lua.createTable(1, 0);
+    _ = lua.pushString("Background");
+    lua.rawSetIndex(-2, 1);
+    lua.setField(-2, "content");
+    lua.rawSetIndex(-2, 1);
+
+    lua.createTable(0, 2);
+    _ = lua.pushString("text");
+    lua.setField(-2, "type");
+    lua.createTable(1, 0);
+    _ = lua.pushString("Overlay");
+    lua.rawSetIndex(-2, 1);
+    lua.setField(-2, "content");
+    lua.rawSetIndex(-2, 2);
+
+    lua.setField(-2, "children");
+
+    var w = try parseWidget(lua, allocator, -1);
+    defer w.deinit(allocator);
+
+    try testing.expectEqual(std.meta.Tag(WidgetKind).stack, std.meta.activeTag(w.kind));
+    try testing.expectEqual(@as(usize, 2), w.kind.stack.children.len);
+}
+
+test "parseWidget - positioned" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var lua = try ziglua.Lua.init(allocator);
+    defer lua.deinit();
+
+    lua.createTable(0, 4);
+    _ = lua.pushString("positioned");
+    lua.setField(-2, "type");
+    _ = lua.pushInteger(10);
+    lua.setField(-2, "x");
+    _ = lua.pushInteger(5);
+    lua.setField(-2, "y");
+    _ = lua.pushString("center");
+    lua.setField(-2, "anchor");
+
+    lua.createTable(0, 2);
+    _ = lua.pushString("text");
+    lua.setField(-2, "type");
+    lua.createTable(1, 0);
+    _ = lua.pushString("Popup");
+    lua.rawSetIndex(-2, 1);
+    lua.setField(-2, "content");
+    lua.setField(-2, "child");
+
+    var w = try parseWidget(lua, allocator, -1);
+    defer w.deinit(allocator);
+
+    try testing.expectEqual(std.meta.Tag(WidgetKind).positioned, std.meta.activeTag(w.kind));
+    try testing.expectEqual(@as(?u16, 10), w.kind.positioned.x);
+    try testing.expectEqual(@as(?u16, 5), w.kind.positioned.y);
+    try testing.expectEqual(Anchor.center, w.kind.positioned.anchor);
 }

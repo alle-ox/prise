@@ -1187,6 +1187,26 @@ pub const App = struct {
                     try self.renderWidget(child, child_win);
                 }
             },
+            .stack => |stack| {
+                for (stack.children) |child| {
+                    const child_win = win.child(.{
+                        .x_off = child.x,
+                        .y_off = child.y,
+                        .width = child.width,
+                        .height = child.height,
+                    });
+                    try self.renderWidget(child, child_win);
+                }
+            },
+            .positioned => |pos| {
+                const child_win = win.child(.{
+                    .x_off = pos.child.x,
+                    .y_off = pos.child.y,
+                    .width = pos.child.width,
+                    .height = pos.child.height,
+                });
+                try self.renderWidget(pos.child.*, child_win);
+            },
         }
     }
 
