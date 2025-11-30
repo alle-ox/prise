@@ -987,6 +987,57 @@ const Client = struct {
                     } else {
                         log.warn("write_pty notification: invalid params", .{});
                     }
+                } else if (std.mem.eql(u8, notif.method, "paste_input")) {
+                    if (notif.params == .array and notif.params.array.len >= 2) {
+                        const pty_id: usize = switch (notif.params.array[0]) {
+                            .unsigned => |u| @intCast(u),
+                            .integer => |i| @intCast(i),
+                            else => {
+                                log.warn("paste_input notification: invalid pty_id type", .{});
+                                return;
+                            },
+                        };
+                        const paste_data = if (notif.params.array[1] == .binary)
+                            notif.params.array[1].binary
+                        else if (notif.params.array[1] == .string)
+                            notif.params.array[1].string
+                        else {
+                            log.warn("paste_input notification: invalid data type", .{});
+                            return;
+                        };
+
+                        if (self.server.ptys.get(pty_id)) |pty_instance| {
+                            pty_instance.terminal_mutex.lock();
+                            const bracketed = pty_instance.terminal.modes.get(.bracketed_paste);
+                            pty_instance.terminal_mutex.unlock();
+
+                            if (bracketed) {
+                                _ = posix.write(pty_instance.process.master, "\x1b[200~") catch |err| {
+                                    log.err("Write to PTY failed: {}", .{err});
+                                };
+                                _ = posix.write(pty_instance.process.master, paste_data) catch |err| {
+                                    log.err("Write to PTY failed: {}", .{err});
+                                };
+                                _ = posix.write(pty_instance.process.master, "\x1b[201~") catch |err| {
+                                    log.err("Write to PTY failed: {}", .{err});
+                                };
+                            } else {
+                                const mutable_data = self.server.allocator.dupe(u8, paste_data) catch |err| {
+                                    log.err("Failed to allocate paste buffer: {}", .{err});
+                                    return;
+                                };
+                                defer self.server.allocator.free(mutable_data);
+                                std.mem.replaceScalar(u8, mutable_data, '\n', '\r');
+                                _ = posix.write(pty_instance.process.master, mutable_data) catch |err| {
+                                    log.err("Write to PTY failed: {}", .{err});
+                                };
+                            }
+                        } else {
+                            log.warn("paste_input notification: PTY {} not found", .{pty_id});
+                        }
+                    } else {
+                        log.warn("paste_input notification: invalid params", .{});
+                    }
                 } else if (std.mem.eql(u8, notif.method, "key_input") or std.mem.eql(u8, notif.method, "key_release")) {
                     const is_release = std.mem.eql(u8, notif.method, "key_release");
                     if (notif.params == .array and notif.params.array.len >= 2) {

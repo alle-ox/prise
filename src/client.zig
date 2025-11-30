@@ -15,6 +15,8 @@ const posix = std.posix;
 
 const log = std.log.scoped(.client);
 
+const MAX_PASTE_SIZE = 10 * 1024 * 1024; // 10 MiB
+
 pub const MsgId = enum(u16) {
     spawn_pty = 1,
     attach_pty = 2,
@@ -446,6 +448,8 @@ pub const App = struct {
     pending_attach_ids: ?[]u32 = null,
     pending_attach_count: usize = 0,
     session_json: ?[]const u8 = null,
+
+    paste_buffer: ?std.ArrayList(u8) = null,
 
     pub const TerminalColors = struct {
         fg: ?vaxis.Cell.Color = null,
@@ -977,6 +981,8 @@ pub const App = struct {
                 try self.vx.enableDetectedFeatures(self.tty.writer());
                 // Enable mouse mode (uses pixel coordinates if supported)
                 try self.vx.setMouseMode(self.tty.writer(), true);
+                // Enable bracketed paste mode
+                try self.vx.setBracketedPaste(self.tty.writer(), true);
                 // Send init event
                 self.ui.update(.init) catch |err| {
                     log.err("Failed to update UI with init: {}", .{err});
@@ -1003,6 +1009,29 @@ pub const App = struct {
                     },
                     else => {},
                 }
+            },
+            .paste_start => {
+                self.paste_buffer = .empty;
+            },
+            .paste => |data| {
+                if (self.paste_buffer) |*buf| {
+                    if (buf.items.len + data.len <= MAX_PASTE_SIZE) {
+                        buf.appendSlice(self.allocator, data) catch |err| {
+                            log.err("Failed to append paste data: {}", .{err});
+                        };
+                    } else {
+                        log.warn("Paste data exceeds maximum size of {} bytes, truncating", .{MAX_PASTE_SIZE});
+                    }
+                }
+            },
+            .paste_end => {
+                if (self.paste_buffer) |*buf| {
+                    self.sendPaste(buf.items) catch |err| {
+                        log.err("Failed to send paste: {}", .{err});
+                    };
+                    buf.deinit(self.allocator);
+                }
+                self.paste_buffer = null;
             },
             else => {},
         }
@@ -1034,6 +1063,27 @@ pub const App = struct {
             };
             log.info("Surface initialized: {}x{}", .{ cols, rows });
         }
+    }
+
+    fn sendPaste(self: *App, data: []const u8) !void {
+        const pty_id = self.state.pty_id orelse return;
+
+        var params = try self.allocator.alloc(msgpack.Value, 2);
+        defer self.allocator.free(params);
+        params[0] = .{ .integer = pty_id };
+        params[1] = .{ .binary = data };
+
+        var arr = try self.allocator.alloc(msgpack.Value, 3);
+        defer self.allocator.free(arr);
+        arr[0] = .{ .unsigned = 2 }; // notification
+        arr[1] = .{ .string = "paste_input" };
+        arr[2] = .{ .array = params };
+
+        const msg = try msgpack.encodeFromValue(self.allocator, .{ .array = arr });
+        defer self.allocator.free(msg);
+
+        try self.sendDirect(msg);
+        log.debug("Sent paste_input: {} bytes to pty {}", .{ data.len, pty_id });
     }
 
     pub fn sendResize(self: *App, pty_id: u32, rows: u16, cols: u16) !void {
