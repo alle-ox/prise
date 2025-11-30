@@ -73,8 +73,19 @@ const Pty = struct {
 
     fn init(allocator: std.mem.Allocator, id: usize, process_instance: pty.Process, size: pty.winsize) !*Pty {
         const instance = try allocator.create(Pty);
+        errdefer allocator.destroy(instance);
+
         const pipe_fds = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
+        errdefer {
+            posix.close(pipe_fds[0]);
+            posix.close(pipe_fds[1]);
+        }
+
         const exit_pipe_fds = try posix.pipe2(.{ .NONBLOCK = true, .CLOEXEC = true });
+        errdefer {
+            posix.close(exit_pipe_fds[0]);
+            posix.close(exit_pipe_fds[1]);
+        }
 
         instance.* = .{
             .id = id,
