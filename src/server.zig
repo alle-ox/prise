@@ -18,6 +18,12 @@ const posix = std.posix;
 
 const log = std.log.scoped(.server);
 
+pub const std_options: std.Options = .{
+    .log_scope_levels = &.{
+        .{ .scope = .page_list, .level = .warn },
+    },
+};
+
 /// Resource limits to prevent unbounded growth in the long-running daemon.
 pub const LIMITS = struct {
     pub const CLIENTS_MAX: usize = 64;
@@ -362,13 +368,15 @@ const Pty = struct {
             } else {
                 log.info("PTY {} process {} still alive, sending KILL", .{ self.id, self.process.pid });
                 _ = posix.kill(-self.process.pid, posix.SIG.KILL) catch {};
-                // SIGKILL can't be caught - block until process exits
-                const kill_result = posix.waitpid(self.process.pid, 0);
-                status = kill_result.status;
-                log.info("PTY {} process {} exited with status {}", .{ self.id, self.process.pid, status });
-                break;
+                // SIGKILL can't be caught - but still use WNOHANG to avoid hanging
+                // if process was already reaped by earlier iteration
             }
             attempts += 1;
+            // Give up after 20 attempts (200ms) - process is gone or something is very wrong
+            if (attempts >= 20) {
+                log.warn("PTY {} giving up waiting for process {} after {} attempts", .{ self.id, self.process.pid, attempts });
+                break;
+            }
             std.Thread.sleep(10 * std.time.ns_per_ms);
         }
 
