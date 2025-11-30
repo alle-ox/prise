@@ -404,48 +404,33 @@ fn getStyleAttributes(style: ghostty_vt.Style) redraw.UIEvent.Style.Attributes {
 /// Captured screen state for building redraw notifications
 pub const RenderMode = enum { full, incremental };
 
-/// Build redraw message directly from PTY render state
-fn buildRedrawMessageFromPty(
-    allocator: std.mem.Allocator,
-    pty_instance: *Pty,
-    mode: RenderMode,
-) ![]u8 {
-    var builder = redraw.RedrawBuilder.init(allocator);
-    defer builder.deinit();
+/// State passed between redraw helper functions
+const RedrawContext = struct {
+    builder: *redraw.RedrawBuilder,
+    temp_alloc: std.mem.Allocator,
+    pty_id: usize,
+    rows: usize,
+    cols: usize,
+    default_style: ghostty_vt.Style,
+    styles_map: std.AutoHashMap(u64, u32),
+    next_style_id: u32,
+    last_style: ?ghostty_vt.Style,
+    last_style_id: u32,
+};
 
-    // Temporary arena for this build operation (text buffers, style map, etc)
-    var temp_arena = std.heap.ArenaAllocator.init(allocator);
-    defer temp_arena.deinit();
-    const temp_alloc = temp_arena.allocator();
-
-    pty_instance.terminal_mutex.lock();
-    try pty_instance.render_state.update(pty_instance.allocator, &pty_instance.terminal);
-    const mouse_shape = mapMouseShape(pty_instance.terminal.mouse_shape);
-    pty_instance.terminal_mutex.unlock();
-
-    const rs = &pty_instance.render_state;
-
-    // Handle title
+fn emitTitle(builder: *redraw.RedrawBuilder, pty_instance: *Pty, mode: RenderMode) !void {
     if (mode == .full or pty_instance.title_dirty) {
         try builder.title(@intCast(pty_instance.id), pty_instance.title.items);
         pty_instance.title_dirty = false;
     }
+}
 
-    var effective_mode = mode;
-    if (rs.dirty == .full) effective_mode = .full;
-    rs.dirty = .false;
+fn emitResize(builder: *redraw.RedrawBuilder, pty_id: usize, rows: usize, cols: usize) !void {
+    try builder.resize(@intCast(pty_id), @intCast(rows), @intCast(cols));
+}
 
-    const rows = rs.rows;
-    const cols = rs.cols;
-
-    if (effective_mode == .full) {
-        try builder.resize(@intCast(pty_instance.id), @intCast(rows), @intCast(cols));
-    }
-
-    // Style deduplication
+fn initStylesContext(temp_alloc: std.mem.Allocator, builder: *redraw.RedrawBuilder, pty_id: usize, rows: usize, cols: usize) !RedrawContext {
     var styles_map = std.AutoHashMap(u64, u32).init(temp_alloc);
-    var next_style_id: u32 = 1;
-
     const default_style: ghostty_vt.Style = .{
         .fg_color = .none,
         .bg_color = .none,
@@ -454,197 +439,224 @@ fn buildRedrawMessageFromPty(
     };
     const default_hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&default_style));
     try styles_map.put(default_hash, 0);
-    try builder.style(0, .{}); // Ensure default style is known
+    try builder.style(0, .{});
 
-    // Iteration buffers
+    return .{
+        .builder = builder,
+        .temp_alloc = temp_alloc,
+        .pty_id = pty_id,
+        .rows = rows,
+        .cols = cols,
+        .default_style = default_style,
+        .styles_map = styles_map,
+        .next_style_id = 1,
+        .last_style = null,
+        .last_style_id = 0,
+    };
+}
+
+fn resolveStyle(ctx: *RedrawContext, vt_style: ghostty_vt.Style) !u32 {
+    if (ctx.last_style) |last| {
+        if (std.meta.eql(last, vt_style)) {
+            return ctx.last_style_id;
+        }
+    }
+
+    const style_hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&vt_style));
+    if (ctx.styles_map.get(style_hash)) |id| {
+        ctx.last_style = vt_style;
+        ctx.last_style_id = id;
+        return id;
+    }
+
+    const style_id = ctx.next_style_id;
+    ctx.next_style_id += 1;
+    try ctx.styles_map.put(style_hash, style_id);
+    const attrs = getStyleAttributes(vt_style);
+    try ctx.builder.style(style_id, attrs);
+    ctx.last_style = vt_style;
+    ctx.last_style_id = style_id;
+    return style_id;
+}
+
+const CellSlices = struct {
+    raw: []const ghostty_vt.page.Cell,
+    style: []const ghostty_vt.Style,
+    grapheme: []const []const u21,
+};
+
+fn encodeGraphemeToUtf8(temp_alloc: std.mem.Allocator, cluster: []const u21) ![]const u8 {
+    if (cluster.len == 0) return try temp_alloc.dupe(u8, " ");
+
+    var utf8_buf: [4]u8 = undefined;
+    var stack_buf: [64]u8 = undefined;
+    var stack_len: usize = 0;
+    for (cluster) |cp| {
+        if (stack_len + 4 > stack_buf.len) break;
+        const len = std.unicode.utf8Encode(cp, &utf8_buf) catch continue;
+        @memcpy(stack_buf[stack_len..][0..len], utf8_buf[0..len]);
+        stack_len += len;
+    }
+    return try temp_alloc.dupe(u8, stack_buf[0..stack_len]);
+}
+
+fn resolveCellText(
+    ctx: *RedrawContext,
+    raw_cell: ghostty_vt.page.Cell,
+    grapheme_slice: []const u21,
+    is_direct_color: bool,
+) ![]const u8 {
+    if (is_direct_color) return " ";
+
+    var one_grapheme_buf: [1]u21 = undefined;
+    const cluster: []const u21 = switch (raw_cell.content_tag) {
+        .codepoint => blk: {
+            if (raw_cell.content.codepoint != 0) {
+                one_grapheme_buf[0] = raw_cell.content.codepoint;
+                break :blk &one_grapheme_buf;
+            }
+            break :blk &[_]u21{};
+        },
+        .codepoint_grapheme => grapheme_slice,
+        else => &[_]u21{' '},
+    };
+    return try encodeGraphemeToUtf8(ctx.temp_alloc, cluster);
+}
+
+fn detectRepeat(
+    raw_cell: ghostty_vt.page.Cell,
+    slices: CellSlices,
+    x: usize,
+    cols: usize,
+    is_direct_color: bool,
+) usize {
+    var repeat: usize = 1;
+    var next_x = x + 1;
+    if (raw_cell.wide == .wide) next_x += 1;
+
+    while (next_x < cols) {
+        const next_raw = slices.raw[next_x];
+        if (raw_cell.wide != next_raw.wide) break;
+        if (!cellsMatch(raw_cell, next_raw, slices.grapheme, x, next_x, is_direct_color)) break;
+
+        repeat += 1;
+        next_x += 1;
+        if (next_raw.wide == .wide) next_x += 1;
+    }
+    return repeat;
+}
+
+fn cellsMatch(
+    raw_cell: ghostty_vt.page.Cell,
+    next_raw: ghostty_vt.page.Cell,
+    grapheme_slice: []const []const u21,
+    x: usize,
+    next_x: usize,
+    is_direct_color: bool,
+) bool {
+    if (next_raw.content_tag != raw_cell.content_tag or next_raw.style_id != raw_cell.style_id) return false;
+
+    if (is_direct_color) {
+        if (raw_cell.content_tag == .bg_color_rgb) {
+            return std.meta.eql(raw_cell.content.color_rgb, next_raw.content.color_rgb);
+        } else if (raw_cell.content_tag == .bg_color_palette) {
+            return raw_cell.content.color_palette == next_raw.content.color_palette;
+        }
+        return false;
+    }
+
+    if (raw_cell.content_tag == .codepoint) {
+        return next_raw.content.codepoint == raw_cell.content.codepoint;
+    } else if (raw_cell.content_tag == .codepoint_grapheme) {
+        return std.mem.eql(u21, grapheme_slice[x], grapheme_slice[next_x]);
+    }
+    return true;
+}
+
+fn emitRow(ctx: *RedrawContext, y: usize, slices: CellSlices) !void {
+    var cells_buf = std.ArrayList(redraw.UIEvent.Write.Cell).empty;
+    var last_hl_id: u32 = 0;
+    var x: usize = 0;
+
+    while (x < ctx.cols) {
+        const raw_cell = slices.raw[x];
+        if (raw_cell.wide == .spacer_tail) {
+            x += 1;
+            continue;
+        }
+
+        var vt_style = if (raw_cell.style_id > 0) slices.style[x] else ctx.default_style;
+        var is_direct_color = false;
+
+        if (raw_cell.content_tag == .bg_color_rgb) {
+            const cell_rgb = raw_cell.content.color_rgb;
+            vt_style.bg_color = .{ .rgb = .{ .r = cell_rgb.r, .g = cell_rgb.g, .b = cell_rgb.b } };
+            is_direct_color = true;
+        } else if (raw_cell.content_tag == .bg_color_palette) {
+            vt_style.bg_color = .{ .palette = raw_cell.content.color_palette };
+            is_direct_color = true;
+        }
+
+        const style_id = try resolveStyle(ctx, vt_style);
+        const text = try resolveCellText(ctx, raw_cell, slices.grapheme[x], is_direct_color);
+        const repeat = detectRepeat(raw_cell, slices, x, ctx.cols, is_direct_color);
+
+        const hl_id_to_send: ?u32 = if (style_id != last_hl_id) style_id else null;
+        if (hl_id_to_send) |id| last_hl_id = id;
+
+        try cells_buf.append(ctx.temp_alloc, .{
+            .grapheme = text,
+            .style_id = hl_id_to_send,
+            .repeat = if (repeat > 1) @intCast(repeat) else null,
+            .width = if (raw_cell.wide == .wide) 2 else null,
+        });
+
+        x += repeat;
+        if (raw_cell.wide == .wide) x += repeat;
+    }
+
+    if (cells_buf.items.len > 0) {
+        try ctx.builder.write(@intCast(ctx.pty_id), @intCast(y), 0, cells_buf.items);
+    }
+}
+
+fn emitRows(ctx: *RedrawContext, rs: *ghostty_vt.RenderState, effective_mode: RenderMode) !void {
     const row_data_slice = rs.row_data.slice();
     const row_cells = row_data_slice.items(.cells);
     const row_dirties = row_data_slice.items(.dirty);
 
-    var last_style: ?ghostty_vt.Style = null;
-    var last_style_id: u32 = 0;
-
-    // Reused buffers for text encoding
-    var utf8_buf: [4]u8 = undefined;
-    var one_grapheme_buf: [1]u21 = undefined;
-
-    for (0..rows) |y| {
+    for (0..ctx.rows) |y| {
         if (effective_mode == .incremental and !row_dirties[y]) continue;
         row_dirties[y] = false;
 
-        var cells_buf = std.ArrayList(redraw.UIEvent.Write.Cell).empty;
-
         const rs_cells = row_cells[y];
         const rs_cells_slice = rs_cells.slice();
-        const rs_cells_raw = rs_cells_slice.items(.raw);
-        const rs_cells_style = rs_cells_slice.items(.style);
-        const rs_cells_grapheme = rs_cells_slice.items(.grapheme);
-
-        var last_hl_id: u32 = 0;
-
-        var x: usize = 0;
-        while (x < cols) {
-            const raw_cell = rs_cells_raw[x];
-
-            if (raw_cell.wide == .spacer_tail) {
-                x += 1;
-                continue;
-            }
-
-            // Resolve style
-            var vt_style = if (raw_cell.style_id > 0) rs_cells_style[x] else default_style;
-            var is_direct_color = false;
-
-            if (raw_cell.content_tag == .bg_color_rgb) {
-                const cell_rgb = raw_cell.content.color_rgb;
-                vt_style.bg_color = .{ .rgb = .{ .r = cell_rgb.r, .g = cell_rgb.g, .b = cell_rgb.b } };
-                is_direct_color = true;
-            } else if (raw_cell.content_tag == .bg_color_palette) {
-                vt_style.bg_color = .{ .palette = raw_cell.content.color_palette };
-                is_direct_color = true;
-            }
-
-            var style_id: u32 = 0;
-            var found_match = false;
-
-            if (last_style) |last| {
-                if (std.meta.eql(last, vt_style)) {
-                    style_id = last_style_id;
-                    found_match = true;
-                }
-            }
-
-            if (!found_match) {
-                const style_hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&vt_style));
-                if (styles_map.get(style_hash)) |id| {
-                    style_id = id;
-                } else {
-                    style_id = next_style_id;
-                    next_style_id += 1;
-                    try styles_map.put(style_hash, style_id);
-                    const attrs = getStyleAttributes(vt_style);
-                    try builder.style(style_id, attrs);
-                }
-                last_style = vt_style;
-                last_style_id = style_id;
-            }
-
-            // Resolve text
-            var text: []const u8 = "";
-            if (is_direct_color) {
-                text = " ";
-            } else {
-                var cluster: []const u21 = &[_]u21{};
-                switch (raw_cell.content_tag) {
-                    .codepoint => {
-                        if (raw_cell.content.codepoint != 0) {
-                            one_grapheme_buf[0] = raw_cell.content.codepoint;
-                            cluster = &one_grapheme_buf;
-                        }
-                    },
-                    .codepoint_grapheme => {
-                        cluster = rs_cells_grapheme[x];
-                    },
-                    else => {
-                        cluster = &[_]u21{' '};
-                    },
-                }
-
-                if (cluster.len > 0) {
-                    // Encode to utf8
-                    var stack_buf: [64]u8 = undefined;
-                    var stack_len: usize = 0;
-                    for (cluster) |cp| {
-                        if (stack_len + 4 > stack_buf.len) break;
-                        const len = std.unicode.utf8Encode(cp, &utf8_buf) catch continue;
-                        @memcpy(stack_buf[stack_len..][0..len], utf8_buf[0..len]);
-                        stack_len += len;
-                    }
-                    text = try temp_alloc.dupe(u8, stack_buf[0..stack_len]);
-                } else {
-                    text = try temp_alloc.dupe(u8, " ");
-                }
-            }
-
-            // Repeat detection
-            var repeat: usize = 1;
-            var next_x = x + 1;
-            if (raw_cell.wide == .wide) next_x += 1;
-
-            while (next_x < cols) {
-                if (next_x >= cols) break;
-                const next_raw = rs_cells_raw[next_x];
-
-                // Width mismatch
-                if (raw_cell.wide != next_raw.wide) break;
-
-                var next_text_match = false;
-
-                // For direct color, ensure tag matches and color matches
-                if (is_direct_color) {
-                    if (next_raw.content_tag == raw_cell.content_tag and next_raw.style_id == raw_cell.style_id) {
-                        if (raw_cell.content_tag == .bg_color_rgb) {
-                            if (std.meta.eql(raw_cell.content.color_rgb, next_raw.content.color_rgb)) next_text_match = true;
-                        } else if (raw_cell.content_tag == .bg_color_palette) {
-                            if (raw_cell.content.color_palette == next_raw.content.color_palette) next_text_match = true;
-                        }
-                    }
-                } else {
-                    // Normal text
-                    if (next_raw.content_tag == raw_cell.content_tag and next_raw.style_id == raw_cell.style_id) {
-                        if (raw_cell.content_tag == .codepoint) {
-                            if (next_raw.content.codepoint == raw_cell.content.codepoint) next_text_match = true;
-                        } else if (raw_cell.content_tag == .codepoint_grapheme) {
-                            if (std.mem.eql(u21, rs_cells_grapheme[x], rs_cells_grapheme[next_x])) next_text_match = true;
-                        } else {
-                            next_text_match = true;
-                        }
-                    }
-                }
-
-                if (!next_text_match) break;
-
-                repeat += 1;
-                next_x += 1;
-                if (next_raw.wide == .wide) next_x += 1;
-            }
-
-            const hl_id_to_send: ?u32 = if (style_id != last_hl_id) style_id else null;
-            if (hl_id_to_send) |id| last_hl_id = id;
-
-            try cells_buf.append(temp_alloc, .{
-                .grapheme = text,
-                .style_id = hl_id_to_send,
-                .repeat = if (repeat > 1) @intCast(repeat) else null,
-                .width = if (raw_cell.wide == .wide) 2 else null,
-            });
-
-            x = next_x;
-        }
-
-        if (cells_buf.items.len > 0) {
-            try builder.write(@intCast(pty_instance.id), @intCast(y), 0, cells_buf.items);
-        }
+        const slices: CellSlices = .{
+            .raw = rs_cells_slice.items(.raw),
+            .style = rs_cells_slice.items(.style),
+            .grapheme = rs_cells_slice.items(.grapheme),
+        };
+        try emitRow(ctx, y, slices);
     }
+}
 
+fn emitCursor(builder: *redraw.RedrawBuilder, pty_id: usize, rs: *const ghostty_vt.RenderState) !void {
     const cursor_visible = rs.cursor.visible and rs.cursor.viewport != null;
     if (rs.cursor.viewport) |vp| {
-        try builder.cursorPos(@intCast(pty_instance.id), @intCast(vp.y), @intCast(vp.x), cursor_visible);
+        try builder.cursorPos(@intCast(pty_id), @intCast(vp.y), @intCast(vp.x), cursor_visible);
     } else {
-        try builder.cursorPos(@intCast(pty_instance.id), @intCast(rs.cursor.active.y), @intCast(rs.cursor.active.x), cursor_visible);
+        try builder.cursorPos(@intCast(pty_id), @intCast(rs.cursor.active.y), @intCast(rs.cursor.active.x), cursor_visible);
     }
     const shape: redraw.UIEvent.CursorShape.Shape = switch (rs.cursor.visual_style) {
         .block, .block_hollow => .block,
         .bar => .beam,
         .underline => .underline,
     };
-    try builder.cursorShape(@intCast(pty_instance.id), shape);
+    try builder.cursorShape(@intCast(pty_id), shape);
+}
 
-    // Send mouse shape
-    try builder.mouseShape(@intCast(pty_instance.id), mouse_shape);
-
-    // Send selection bounds from row_data
-    const row_selections = row_data_slice.items(.selection);
+fn emitSelection(builder: *redraw.RedrawBuilder, pty_id: usize, rs: *const ghostty_vt.RenderState) !void {
+    const row_selections = rs.row_data.slice().items(.selection);
     var sel_start_row: ?u16 = null;
     var sel_start_col: ?u16 = null;
     var sel_end_row: ?u16 = null;
@@ -660,8 +672,47 @@ fn buildRedrawMessageFromPty(
             sel_end_col = @intCast(range[1]);
         }
     }
+    try builder.selection(@intCast(pty_id), sel_start_row, sel_start_col, sel_end_row, sel_end_col);
+}
 
-    try builder.selection(@intCast(pty_instance.id), sel_start_row, sel_start_col, sel_end_row, sel_end_col);
+/// Build redraw message directly from PTY render state
+fn buildRedrawMessageFromPty(
+    allocator: std.mem.Allocator,
+    pty_instance: *Pty,
+    mode: RenderMode,
+) ![]u8 {
+    var builder = redraw.RedrawBuilder.init(allocator);
+    defer builder.deinit();
+
+    var temp_arena = std.heap.ArenaAllocator.init(allocator);
+    defer temp_arena.deinit();
+    const temp_alloc = temp_arena.allocator();
+
+    pty_instance.terminal_mutex.lock();
+    try pty_instance.render_state.update(pty_instance.allocator, &pty_instance.terminal);
+    const mouse_shape = mapMouseShape(pty_instance.terminal.mouse_shape);
+    pty_instance.terminal_mutex.unlock();
+
+    const rs = &pty_instance.render_state;
+
+    try emitTitle(&builder, pty_instance, mode);
+
+    var effective_mode = mode;
+    if (rs.dirty == .full) effective_mode = .full;
+    rs.dirty = .false;
+
+    const rows = rs.rows;
+    const cols = rs.cols;
+
+    if (effective_mode == .full) {
+        try emitResize(&builder, pty_instance.id, rows, cols);
+    }
+
+    var ctx = try initStylesContext(temp_alloc, &builder, pty_instance.id, rows, cols);
+    try emitRows(&ctx, rs, effective_mode);
+    try emitCursor(&builder, pty_instance.id, rs);
+    try builder.mouseShape(@intCast(pty_instance.id), mouse_shape);
+    try emitSelection(&builder, pty_instance.id, rs);
 
     try builder.flush();
     return builder.build();
