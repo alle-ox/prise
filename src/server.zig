@@ -2211,10 +2211,11 @@ const Server = struct {
         // Cancel signal watcher
         self.loop.cancelByFd(self.signal_pipe_fds[0]);
 
-        // Signal all PTYs to stop (read threads will handle killing and reaping)
+        // Signal all PTYs to stop and cancel their IO
         var it = self.ptys.valueIterator();
         while (it.next()) |pty_instance| {
             pty_instance.*.running.store(false, .seq_cst);
+            pty_instance.*.cancelPendingIO(self.loop);
             _ = posix.write(pty_instance.*.exit_pipe_fds[1], "q") catch {};
         }
     }
@@ -2306,11 +2307,13 @@ const Server = struct {
                     });
                 }
 
-                // Re-arm
-                _ = try loop.read(pty_instance.pipe_fds[0], &pty_instance.dirty_signal_buf, .{
-                    .ptr = pty_instance,
-                    .cb = onPtyDirty,
-                });
+                // Re-arm only if still running
+                if (pty_instance.running.load(.seq_cst)) {
+                    _ = try loop.read(pty_instance.pipe_fds[0], &pty_instance.dirty_signal_buf, .{
+                        .ptr = pty_instance,
+                        .cb = onPtyDirty,
+                    });
+                }
             },
             .err => |err| {
                 std.log.err("Pty dirty pipe error: {}", .{err});
