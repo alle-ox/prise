@@ -72,7 +72,6 @@ const Pty = struct {
     clients: std.ArrayList(*Client),
     read_thread: ?std.Thread = null,
     running: std.atomic.Value(bool),
-    keep_alive: bool = false,
     terminal: ghostty_vt.Terminal,
     allocator: std.mem.Allocator,
 
@@ -1518,8 +1517,6 @@ const Client = struct {
         };
 
         if (self.server.ptys.get(pty_id)) |pty_instance| {
-            pty_instance.keep_alive = true;
-
             for (self.server.clients.items) |c| {
                 if (c.fd == client_fd) {
                     pty_instance.removeClient(c);
@@ -1529,7 +1526,7 @@ const Client = struct {
                             break;
                         }
                     }
-                    log.info("Client {} detached from PTY {} (marked keep_alive)", .{ c.fd, pty_id });
+                    log.info("Client {} detached from PTY {}", .{ c.fd, pty_id });
                     break;
                 }
             }
@@ -1996,8 +1993,6 @@ const Server = struct {
             return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
         };
 
-        pty_instance.keep_alive = true;
-
         for (self.clients.items) |c| {
             if (c.fd == args.client_fd) {
                 pty_instance.removeClient(c);
@@ -2007,7 +2002,7 @@ const Server = struct {
                         break;
                     }
                 }
-                log.info("Client {} detached from PTY {} (marked keep_alive)", .{ c.fd, args.id });
+                log.info("Client {} detached from PTY {}", .{ c.fd, args.id });
                 break;
             }
         }
@@ -2049,8 +2044,6 @@ const Server = struct {
             };
 
             if (self.ptys.get(pty_id)) |pty_instance| {
-                pty_instance.keep_alive = true;
-
                 if (matching_client) |c| {
                     pty_instance.removeClient(c);
                     for (c.attached_ptys.items, 0..) |pid, i| {
@@ -2060,7 +2053,7 @@ const Server = struct {
                         }
                     }
                 }
-                std.log.info("PTY {} marked keep_alive", .{pty_id});
+                std.log.info("Client detached from PTY {}", .{pty_id});
             }
         }
 
@@ -2145,27 +2138,10 @@ const Server = struct {
     }
 
     fn cleanupPtysForClient(self: *Server, client: *Client) void {
-        var to_remove = std.ArrayList(usize).empty;
-        defer to_remove.deinit(self.allocator);
-
         for (client.attached_ptys.items) |pty_id| {
             if (self.ptys.get(pty_id)) |pty_instance| {
                 pty_instance.removeClient(client);
                 std.log.info("Auto-removed client {} from PTY {}", .{ client.fd, pty_id });
-
-                // If no more clients attached and not marked keep_alive, kill the PTY
-                if (pty_instance.clients.items.len == 0 and !pty_instance.keep_alive) {
-                    to_remove.append(self.allocator, pty_id) catch {};
-                }
-            }
-        }
-
-        for (to_remove.items) |pty_id| {
-            if (self.ptys.getPtr(pty_id)) |pty_ptr| {
-                std.log.info("Killing PTY {} (no clients, not keep_alive)", .{pty_id});
-                // Signal read thread to exit - it will handle killing and reaping
-                pty_ptr.*.running.store(false, .seq_cst);
-                _ = posix.write(pty_ptr.*.exit_pipe_fds[1], "q") catch {};
             }
         }
     }
