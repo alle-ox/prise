@@ -141,6 +141,248 @@ pub fn resize(self: *Surface, rows: u16, cols: u16) !void {
     self.dirty = true;
 }
 
+/// Apply cursor position and visibility from a cursor_pos event.
+fn applyCursor(self: *Surface, params: msgpack.Value) void {
+    if (params.array.len < 4) return;
+
+    // args: [pty, row, col, visible]
+    const row = switch (params.array[1]) {
+        .unsigned => |u| @as(u16, @intCast(u)),
+        .integer => |i| @as(u16, @intCast(i)),
+        else => return,
+    };
+    const col = switch (params.array[2]) {
+        .unsigned => |u| @as(u16, @intCast(u)),
+        .integer => |i| @as(u16, @intCast(i)),
+        else => return,
+    };
+    const visible = switch (params.array[3]) {
+        .boolean => |b| b,
+        else => true,
+    };
+
+    self.back.cursor_row = row;
+    self.back.cursor_col = col;
+    self.back.cursor_vis = visible;
+    self.dirty = true;
+}
+
+/// Apply a single cell or run of cells from a write event.
+/// Updates col_ptr to track horizontal position and current_hl_ptr to track style state.
+fn applyCell(self: *Surface, row: usize, col_ptr: *usize, cell: msgpack.Value, current_hl_ptr: *u32) void {
+    if (cell != .array or cell.array.len == 0) return;
+
+    // cell: [grapheme, style_id?, repeat?, width?]
+    const text = if (cell.array[0] == .string) cell.array[0].string else " ";
+
+    if (cell.array.len > 1 and cell.array[1] != .nil) {
+        // Only update when present and not nil; nil means "no change"
+        current_hl_ptr.* = switch (cell.array[1]) {
+            .unsigned => |u| @as(u32, @intCast(u)),
+            .integer => |i| @as(u32, @intCast(i)),
+            else => current_hl_ptr.*,
+        };
+    }
+
+    const repeat: usize = if (cell.array.len > 2 and cell.array[2] != .nil)
+        switch (cell.array[2]) {
+            .unsigned => |u| @intCast(u),
+            .integer => |i| @intCast(i),
+            else => 1,
+        }
+    else
+        1;
+
+    const width: usize = if (cell.array.len > 3 and cell.array[3] != .nil)
+        switch (cell.array[3]) {
+            .unsigned => |u| @intCast(u),
+            .integer => |i| @intCast(i),
+            else => 1,
+        }
+    else
+        1;
+
+    const style = self.hl_attrs.get(current_hl_ptr.*) orelse vaxis.Style{};
+
+    var i: usize = 0;
+    while (i < repeat) : (i += 1) {
+        const col = col_ptr.*;
+        if (col < self.cols and row < self.rows) {
+            self.back.writeCell(@intCast(col), @intCast(row), .{
+                .char = .{ .grapheme = text, .width = @intCast(width) },
+                .style = style,
+            });
+            // Write spacer cells for wide characters
+            for (1..width) |offset| {
+                if (col + offset < self.cols) {
+                    self.back.writeCell(@intCast(col + offset), @intCast(row), .{
+                        .char = .{ .grapheme = "", .width = 0 },
+                        .style = style,
+                    });
+                }
+            }
+        }
+        col_ptr.* += width;
+    }
+}
+
+/// Apply style definition from a style event.
+fn applyStyle(self: *Surface, params: msgpack.Value) !void {
+    if (params.array.len < 2) return;
+
+    // args: [id, map]
+    const id = switch (params.array[0]) {
+        .unsigned => |u| @as(u32, @intCast(u)),
+        .integer => |i| @as(u32, @intCast(i)),
+        else => return,
+    };
+
+    const attrs = params.array[1];
+    if (attrs != .map) return;
+
+    var style = vaxis.Style{};
+
+    for (attrs.map) |kv| {
+        if (kv.key != .string) continue;
+        const key = kv.key.string;
+
+        if (std.mem.eql(u8, key, "fg")) {
+            const val: ?u32 = switch (kv.value) {
+                .unsigned => |u| @intCast(u),
+                .integer => |i| @intCast(i),
+                else => null,
+            };
+            if (val) |v| {
+                style.fg = .{ .rgb = .{
+                    @intCast((v >> 16) & 0xFF),
+                    @intCast((v >> 8) & 0xFF),
+                    @intCast(v & 0xFF),
+                } };
+            }
+        } else if (std.mem.eql(u8, key, "fg_idx")) {
+            const val: ?u8 = switch (kv.value) {
+                .unsigned => |u| @intCast(u),
+                .integer => |i| @intCast(i),
+                else => null,
+            };
+            if (val) |v| {
+                style.fg = .{ .index = v };
+            }
+        } else if (std.mem.eql(u8, key, "bg")) {
+            const val: ?u32 = switch (kv.value) {
+                .unsigned => |u| @intCast(u),
+                .integer => |i| @intCast(i),
+                else => null,
+            };
+            if (val) |v| {
+                style.bg = .{ .rgb = .{
+                    @intCast((v >> 16) & 0xFF),
+                    @intCast((v >> 8) & 0xFF),
+                    @intCast(v & 0xFF),
+                } };
+            }
+        } else if (std.mem.eql(u8, key, "bg_idx")) {
+            const val: ?u8 = switch (kv.value) {
+                .unsigned => |u| @intCast(u),
+                .integer => |i| @intCast(i),
+                else => null,
+            };
+            if (val) |v| {
+                style.bg = .{ .index = v };
+            }
+        } else if (std.mem.eql(u8, key, "bold")) {
+            if (kv.value == .boolean) style.bold = kv.value.boolean;
+        } else if (std.mem.eql(u8, key, "dim")) {
+            if (kv.value == .boolean) style.dim = kv.value.boolean;
+        } else if (std.mem.eql(u8, key, "italic")) {
+            if (kv.value == .boolean) style.italic = kv.value.boolean;
+        } else if (std.mem.eql(u8, key, "underline")) {
+            if (kv.value == .boolean and kv.value.boolean) {
+                // Only set if not already set by ul_style
+                if (style.ul_style == .off) {
+                    style.ul_style = .single;
+                }
+            }
+        } else if (std.mem.eql(u8, key, "ul_style")) {
+            const val: ?u8 = switch (kv.value) {
+                .unsigned => |u| @intCast(u),
+                .integer => |i| @intCast(i),
+                else => null,
+            };
+            if (val) |v| {
+                style.ul_style = switch (v) {
+                    1 => .single,
+                    2 => .double,
+                    3 => .curly,
+                    4 => .dotted,
+                    5 => .dashed,
+                    else => .off,
+                };
+            }
+        } else if (std.mem.eql(u8, key, "ul_color")) {
+            const val: ?u32 = switch (kv.value) {
+                .unsigned => |u| @intCast(u),
+                .integer => |i| @intCast(i),
+                else => null,
+            };
+            if (val) |v| {
+                style.ul = .{ .rgb = .{
+                    @intCast((v >> 16) & 0xFF),
+                    @intCast((v >> 8) & 0xFF),
+                    @intCast(v & 0xFF),
+                } };
+            }
+        } else if (std.mem.eql(u8, key, "strikethrough")) {
+            if (kv.value == .boolean) style.strikethrough = kv.value.boolean;
+        } else if (std.mem.eql(u8, key, "reverse")) {
+            if (kv.value == .boolean) style.reverse = kv.value.boolean;
+        } else if (std.mem.eql(u8, key, "blink")) {
+            if (kv.value == .boolean) style.blink = kv.value.boolean;
+        }
+    }
+
+    try self.hl_attrs.put(id, style);
+}
+
+/// Apply selection bounds from a selection event.
+fn applySelection(self: *Surface, params: msgpack.Value) void {
+    if (params.array.len < 5) return;
+
+    // args: [pty, start_row, start_col, end_row, end_col] (nulls mean no selection)
+    const start_row = switch (params.array[1]) {
+        .unsigned => |u| @as(u16, @intCast(u)),
+        .integer => |i| @as(u16, @intCast(i)),
+        else => null,
+    };
+    const start_col = switch (params.array[2]) {
+        .unsigned => |u| @as(u16, @intCast(u)),
+        .integer => |i| @as(u16, @intCast(i)),
+        else => null,
+    };
+    const end_row = switch (params.array[3]) {
+        .unsigned => |u| @as(u16, @intCast(u)),
+        .integer => |i| @as(u16, @intCast(i)),
+        else => null,
+    };
+    const end_col = switch (params.array[4]) {
+        .unsigned => |u| @as(u16, @intCast(u)),
+        .integer => |i| @as(u16, @intCast(i)),
+        else => null,
+    };
+
+    if (start_row != null and start_col != null and end_row != null and end_col != null) {
+        self.selection = .{
+            .start_row = start_row.?,
+            .start_col = start_col.?,
+            .end_row = end_row.?,
+            .end_col = end_col.?,
+        };
+    } else {
+        self.selection = null;
+    }
+    self.dirty = true;
+}
+
 pub fn applyRedraw(self: *Surface, params: msgpack.Value) !void {
     if (params != .array) return error.InvalidRedrawParams;
 
@@ -193,28 +435,7 @@ pub fn applyRedraw(self: *Surface, params: msgpack.Value) !void {
                 // BUT, if we get a resize event, it's likely followed by write events filling the new size.
             }
         } else if (std.mem.eql(u8, event_name.string, "cursor_pos")) {
-            if (event_params.array.len < 4) continue;
-
-            // args: [pty, row, col, visible]
-            const row = switch (event_params.array[1]) {
-                .unsigned => |u| @as(u16, @intCast(u)),
-                .integer => |i| @as(u16, @intCast(i)),
-                else => continue,
-            };
-            const col = switch (event_params.array[2]) {
-                .unsigned => |u| @as(u16, @intCast(u)),
-                .integer => |i| @as(u16, @intCast(i)),
-                else => continue,
-            };
-            const visible = switch (event_params.array[3]) {
-                .boolean => |b| b,
-                else => true,
-            };
-
-            self.back.cursor_row = row;
-            self.back.cursor_col = col;
-            self.back.cursor_vis = visible;
-            self.dirty = true;
+            self.applyCursor(event_params);
         } else if (std.mem.eql(u8, event_name.string, "cursor_shape")) {
             if (event_params.array.len < 2) continue;
 
@@ -256,7 +477,7 @@ pub fn applyRedraw(self: *Surface, params: msgpack.Value) !void {
                 .integer => |i| @as(usize, @intCast(i)),
                 else => continue,
             };
-            var col = switch (event_params.array[2]) {
+            var col: usize = switch (event_params.array[2]) {
                 .unsigned => |u| @as(usize, @intCast(u)),
                 .integer => |i| @as(usize, @intCast(i)),
                 else => continue,
@@ -273,212 +494,13 @@ pub fn applyRedraw(self: *Surface, params: msgpack.Value) !void {
             // current_hl resets to 0 at the start of each write event
             var current_hl: u32 = 0;
             for (cells.array) |cell| {
-                if (cell != .array or cell.array.len == 0) continue;
-
-                // cell: [grapheme, style_id?, repeat?]
-                const text = if (cell.array[0] == .string) cell.array[0].string else " ";
-
-                if (cell.array.len > 1 and cell.array[1] != .nil) {
-                    // Only update when present and not nil; nil means “no change”
-                    current_hl = switch (cell.array[1]) {
-                        .unsigned => |u| @as(u32, @intCast(u)),
-                        .integer => |i| @as(u32, @intCast(i)),
-                        else => current_hl,
-                    };
-                }
-
-                const repeat: usize = if (cell.array.len > 2 and cell.array[2] != .nil)
-                    switch (cell.array[2]) {
-                        .unsigned => |u| @intCast(u),
-                        .integer => |i| @intCast(i),
-                        else => 1,
-                    }
-                else
-                    1;
-
-                const width: usize = if (cell.array.len > 3 and cell.array[3] != .nil)
-                    switch (cell.array[3]) {
-                        .unsigned => |u| @intCast(u),
-                        .integer => |i| @intCast(i),
-                        else => 1,
-                    }
-                else
-                    1;
-
-                const style = self.hl_attrs.get(current_hl) orelse vaxis.Style{};
-
-                var i: usize = 0;
-                while (i < repeat) : (i += 1) {
-                    if (col < self.cols and row < self.rows) {
-                        self.back.writeCell(@intCast(col), @intCast(row), .{
-                            .char = .{ .grapheme = text, .width = @intCast(width) },
-                            .style = style,
-                        });
-                        // Write spacer cells for wide characters
-                        for (1..width) |offset| {
-                            if (col + offset < self.cols) {
-                                self.back.writeCell(@intCast(col + offset), @intCast(row), .{
-                                    .char = .{ .grapheme = "", .width = 0 },
-                                    .style = style,
-                                });
-                            }
-                        }
-                    }
-                    col += width;
-                }
+                self.applyCell(row, &col, cell, &current_hl);
             }
             self.dirty = true;
         } else if (std.mem.eql(u8, event_name.string, "style")) {
-            if (event_params.array.len < 2) continue;
-
-            // args: [id, map]
-            const id = switch (event_params.array[0]) {
-                .unsigned => |u| @as(u32, @intCast(u)),
-                .integer => |i| @as(u32, @intCast(i)),
-                else => continue,
-            };
-
-            const attrs = event_params.array[1];
-            if (attrs != .map) continue;
-
-            var style = vaxis.Style{};
-
-            for (attrs.map) |kv| {
-                if (kv.key != .string) continue;
-                const key = kv.key.string;
-
-                if (std.mem.eql(u8, key, "fg")) {
-                    const val: ?u32 = switch (kv.value) {
-                        .unsigned => |u| @intCast(u),
-                        .integer => |i| @intCast(i),
-                        else => null,
-                    };
-                    if (val) |v| {
-                        style.fg = .{ .rgb = .{
-                            @intCast((v >> 16) & 0xFF),
-                            @intCast((v >> 8) & 0xFF),
-                            @intCast(v & 0xFF),
-                        } };
-                    }
-                } else if (std.mem.eql(u8, key, "fg_idx")) {
-                    const val: ?u8 = switch (kv.value) {
-                        .unsigned => |u| @intCast(u),
-                        .integer => |i| @intCast(i),
-                        else => null,
-                    };
-                    if (val) |v| {
-                        style.fg = .{ .index = v };
-                    }
-                } else if (std.mem.eql(u8, key, "bg")) {
-                    const val: ?u32 = switch (kv.value) {
-                        .unsigned => |u| @intCast(u),
-                        .integer => |i| @intCast(i),
-                        else => null,
-                    };
-                    if (val) |v| {
-                        style.bg = .{ .rgb = .{
-                            @intCast((v >> 16) & 0xFF),
-                            @intCast((v >> 8) & 0xFF),
-                            @intCast(v & 0xFF),
-                        } };
-                    }
-                } else if (std.mem.eql(u8, key, "bg_idx")) {
-                    const val: ?u8 = switch (kv.value) {
-                        .unsigned => |u| @intCast(u),
-                        .integer => |i| @intCast(i),
-                        else => null,
-                    };
-                    if (val) |v| {
-                        style.bg = .{ .index = v };
-                    }
-                } else if (std.mem.eql(u8, key, "bold")) {
-                    if (kv.value == .boolean) style.bold = kv.value.boolean;
-                } else if (std.mem.eql(u8, key, "dim")) {
-                    if (kv.value == .boolean) style.dim = kv.value.boolean;
-                } else if (std.mem.eql(u8, key, "italic")) {
-                    if (kv.value == .boolean) style.italic = kv.value.boolean;
-                } else if (std.mem.eql(u8, key, "underline")) {
-                    if (kv.value == .boolean and kv.value.boolean) {
-                        // Only set if not already set by ul_style
-                        if (style.ul_style == .off) {
-                            style.ul_style = .single;
-                        }
-                    }
-                } else if (std.mem.eql(u8, key, "ul_style")) {
-                    const val: ?u8 = switch (kv.value) {
-                        .unsigned => |u| @intCast(u),
-                        .integer => |i| @intCast(i),
-                        else => null,
-                    };
-                    if (val) |v| {
-                        style.ul_style = switch (v) {
-                            1 => .single,
-                            2 => .double,
-                            3 => .curly,
-                            4 => .dotted,
-                            5 => .dashed,
-                            else => .off,
-                        };
-                    }
-                } else if (std.mem.eql(u8, key, "ul_color")) {
-                    const val: ?u32 = switch (kv.value) {
-                        .unsigned => |u| @intCast(u),
-                        .integer => |i| @intCast(i),
-                        else => null,
-                    };
-                    if (val) |v| {
-                        style.ul = .{ .rgb = .{
-                            @intCast((v >> 16) & 0xFF),
-                            @intCast((v >> 8) & 0xFF),
-                            @intCast(v & 0xFF),
-                        } };
-                    }
-                } else if (std.mem.eql(u8, key, "strikethrough")) {
-                    if (kv.value == .boolean) style.strikethrough = kv.value.boolean;
-                } else if (std.mem.eql(u8, key, "reverse")) {
-                    if (kv.value == .boolean) style.reverse = kv.value.boolean;
-                } else if (std.mem.eql(u8, key, "blink")) {
-                    if (kv.value == .boolean) style.blink = kv.value.boolean;
-                }
-            }
-
-            try self.hl_attrs.put(id, style);
+            try self.applyStyle(event_params);
         } else if (std.mem.eql(u8, event_name.string, "selection")) {
-            if (event_params.array.len < 5) continue;
-
-            // args: [pty, start_row, start_col, end_row, end_col] (nulls mean no selection)
-            const start_row = switch (event_params.array[1]) {
-                .unsigned => |u| @as(u16, @intCast(u)),
-                .integer => |i| @as(u16, @intCast(i)),
-                else => null,
-            };
-            const start_col = switch (event_params.array[2]) {
-                .unsigned => |u| @as(u16, @intCast(u)),
-                .integer => |i| @as(u16, @intCast(i)),
-                else => null,
-            };
-            const end_row = switch (event_params.array[3]) {
-                .unsigned => |u| @as(u16, @intCast(u)),
-                .integer => |i| @as(u16, @intCast(i)),
-                else => null,
-            };
-            const end_col = switch (event_params.array[4]) {
-                .unsigned => |u| @as(u16, @intCast(u)),
-                .integer => |i| @as(u16, @intCast(i)),
-                else => null,
-            };
-
-            if (start_row != null and start_col != null and end_row != null and end_col != null) {
-                self.selection = .{
-                    .start_row = start_row.?,
-                    .start_col = start_col.?,
-                    .end_row = end_row.?,
-                    .end_col = end_col.?,
-                };
-            } else {
-                self.selection = null;
-            }
-            self.dirty = true;
+            self.applySelection(event_params);
         } else if (std.mem.eql(u8, event_name.string, "flush")) {
             // Flush marks the end of a frame - copy back to front now
 
