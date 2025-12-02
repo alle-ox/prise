@@ -7,6 +7,8 @@ const root = @import("../io.zig");
 const c = std.c;
 const posix = std.posix;
 
+const log = std.log.scoped(.io_kqueue);
+
 const EVENT_BATCH_SIZE: usize = 32;
 
 pub const Loop = struct {

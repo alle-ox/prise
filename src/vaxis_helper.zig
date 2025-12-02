@@ -4,6 +4,8 @@ const std = @import("std");
 
 const vaxis = @import("vaxis");
 
+const log = std.log.scoped(.vaxis_helper);
+
 pub const KeyStrings = struct {
     key: []const u8, // W3C "key" - produced character
     code: []const u8, // W3C "code" - physical key name

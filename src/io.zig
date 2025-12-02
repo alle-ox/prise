@@ -5,6 +5,8 @@ const builtin = @import("builtin");
 
 const posix = std.posix;
 
+const log = std.log.scoped(.io);
+
 const backend = if (builtin.is_test)
     @import("io/mock.zig")
 else switch (builtin.os.tag) {

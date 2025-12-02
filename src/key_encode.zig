@@ -4,6 +4,8 @@ const std = @import("std");
 
 const ghostty = @import("ghostty-vt");
 
+const log = std.log.scoped(.key_encode);
+
 pub fn encode(
     writer: anytype,
     key: ghostty.input.KeyEvent,

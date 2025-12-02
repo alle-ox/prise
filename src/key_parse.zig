@@ -6,6 +6,8 @@ const ghostty = @import("ghostty-vt");
 
 const msgpack = @import("msgpack.zig");
 
+const log = std.log.scoped(.key_parse);
+
 const KeyEvent = ghostty.input.KeyEvent;
 const Key = ghostty.input.Key;
 

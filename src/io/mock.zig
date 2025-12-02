@@ -6,6 +6,8 @@ const root = @import("../io.zig");
 
 const posix = std.posix;
 
+const log = std.log.scoped(.io_mock);
+
 const INITIAL_FD: posix.socket_t = 100;
 
 pub const Loop = struct {

@@ -3,6 +3,8 @@
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
+
+const log = std.log.scoped(.msgpack);
 const testing = std.testing;
 
 const Format = struct {

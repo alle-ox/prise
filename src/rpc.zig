@@ -6,6 +6,8 @@ const msgpack = @import("msgpack.zig");
 
 const Allocator = std.mem.Allocator;
 
+const log = std.log.scoped(.rpc);
+
 /// msgpack-RPC message types
 pub const MessageType = enum(u8) {
     request = 0,

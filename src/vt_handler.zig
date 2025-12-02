@@ -4,6 +4,8 @@ const std = @import("std");
 
 const ghostty_vt = @import("ghostty-vt");
 
+const log = std.log.scoped(.vt_handler);
+
 // Helper aliases for ghostty types
 const Terminal = ghostty_vt.Terminal;
 const Screen = ghostty_vt.Screen;
