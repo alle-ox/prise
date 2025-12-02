@@ -98,10 +98,10 @@ fn parseArgs(allocator: std.mem.Allocator, socket_path: []const u8) !?(?[]const 
     const cmd = args.next() orelse return @as(?[]const u8, null);
 
     if (std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-v")) {
-        var buf: [128]u8 = undefined;
-        var stdout = std.fs.File.stdout().writer(&buf);
-        stdout.interface.print("prise {s}\n", .{version}) catch {};
-        stdout.interface.flush() catch {};
+        try printVersion();
+        return null;
+    } else if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
+        try printHelp();
         return null;
     } else if (std.mem.eql(u8, cmd, "serve")) {
         initLogFile("server.log");
@@ -113,18 +113,73 @@ fn parseArgs(allocator: std.mem.Allocator, socket_path: []const u8) !?(?[]const 
         return try handlePtyCommand(allocator, &args, socket_path);
     } else {
         log.err("Unknown command: {s}", .{cmd});
-        log.err("Available commands: serve, session, pty", .{});
+        try printHelp();
         return error.UnknownCommand;
     }
 }
 
+fn printVersion() !void {
+    var buf: [128]u8 = undefined;
+    var stdout = std.fs.File.stdout().writer(&buf);
+    defer stdout.interface.flush() catch {};
+    try stdout.interface.print("prise {s}\n", .{version});
+}
+
+fn printHelp() !void {
+    var buf: [4096]u8 = undefined;
+    var stdout = std.fs.File.stdout().writer(&buf);
+    defer stdout.interface.flush() catch {};
+    try stdout.interface.print(
+        \\prise - Terminal multiplexer
+        \\
+        \\Usage: prise [command] [options]
+        \\
+        \\Commands:
+        \\  (none)     Start client, connect to server (spawns server if needed)
+        \\  serve      Start the server in the foreground
+        \\  session    Manage sessions (attach, list, rename, delete)
+        \\  pty        Manage PTYs (list, kill)
+        \\
+        \\Options:
+        \\  -h, --help     Show this help message
+        \\  -v, --version  Show version
+        \\
+        \\Run 'prise <command> --help' for more information on a command.
+        \\
+    , .{});
+}
+
+fn printSessionHelp() !void {
+    var buf: [4096]u8 = undefined;
+    var stdout = std.fs.File.stdout().writer(&buf);
+    defer stdout.interface.flush() catch {};
+    try stdout.interface.print(
+        \\prise session - Manage sessions
+        \\
+        \\Usage: prise session <command> [args]
+        \\
+        \\Commands:
+        \\  attach [name]            Attach to a session (most recent if no name given)
+        \\  list                     List all sessions
+        \\  rename <old> <new>       Rename a session
+        \\  delete <name>            Delete a session
+        \\
+        \\Options:
+        \\  -h, --help               Show this help message
+        \\
+    , .{});
+}
+
 fn handleSessionCommand(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !?(?[]const u8) {
     const subcmd = args.next() orelse {
-        log.err("Missing session command. Available commands: attach, list", .{});
+        try printSessionHelp();
         return error.MissingCommand;
     };
 
-    if (std.mem.eql(u8, subcmd, "attach")) {
+    if (std.mem.eql(u8, subcmd, "--help") or std.mem.eql(u8, subcmd, "-h")) {
+        try printSessionHelp();
+        return null;
+    } else if (std.mem.eql(u8, subcmd, "attach")) {
         const session = args.next() orelse try findMostRecentSession(allocator);
         return @as(?[]const u8, session);
     } else if (std.mem.eql(u8, subcmd, "list")) {
@@ -150,23 +205,56 @@ fn handleSessionCommand(allocator: std.mem.Allocator, args: *std.process.ArgIter
         return null;
     } else {
         log.err("Unknown session command: {s}", .{subcmd});
-        log.err("Available commands: attach, list, rename, delete", .{});
+        try printSessionHelp();
         return error.UnknownCommand;
     }
 }
 
+fn printPtyHelp() !void {
+    var buf: [4096]u8 = undefined;
+    var stdout = std.fs.File.stdout().writer(&buf);
+    defer stdout.interface.flush() catch {};
+    try stdout.interface.print(
+        \\prise pty - Manage PTYs
+        \\
+        \\Usage: prise pty <command> [args]
+        \\
+        \\Commands:
+        \\  list                     List all PTYs
+        \\  kill <id>                Kill a PTY by ID
+        \\
+        \\Options:
+        \\  -h, --help               Show this help message
+        \\
+    , .{});
+}
+
 fn handlePtyCommand(allocator: std.mem.Allocator, args: *std.process.ArgIterator, socket_path: []const u8) !?(?[]const u8) {
     const subcmd = args.next() orelse {
-        log.err("Missing pty command. Available commands: list, kill", .{});
+        try printPtyHelp();
         return error.MissingCommand;
     };
 
-    if (std.mem.eql(u8, subcmd, "list")) {
+    if (std.mem.eql(u8, subcmd, "--help") or std.mem.eql(u8, subcmd, "-h")) {
+        try printPtyHelp();
+        return null;
+    } else if (std.mem.eql(u8, subcmd, "list")) {
         try listPtys(allocator, socket_path);
+        return null;
+    } else if (std.mem.eql(u8, subcmd, "kill")) {
+        const id_str = args.next() orelse {
+            log.err("Missing PTY ID. Usage: prise pty kill <id>", .{});
+            return error.MissingArgument;
+        };
+        const pty_id = std.fmt.parseInt(u32, id_str, 10) catch {
+            log.err("Invalid PTY ID: {s}", .{id_str});
+            return error.InvalidArgument;
+        };
+        try killPty(allocator, socket_path, pty_id);
         return null;
     } else {
         log.err("Unknown pty command: {s}", .{subcmd});
-        log.err("Available commands: list, kill", .{});
+        try printPtyHelp();
         return error.UnknownCommand;
     }
 }
@@ -434,6 +522,66 @@ fn listPtys(allocator: std.mem.Allocator, socket_path: []const u8) !void {
             try stdout.interface.print("{d}: {s} [{s}] ({d} clients)\n", .{ pty_id, cwd, title_display, clients });
         }
     }
+}
+
+fn killPty(allocator: std.mem.Allocator, socket_path: []const u8, pty_id: u32) !void {
+    var buf: [4096]u8 = undefined;
+    var stdout = std.fs.File.stdout().writer(&buf);
+    defer stdout.interface.flush() catch {};
+
+    const sock = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch |err| {
+        log.err("Failed to create socket: {}", .{err});
+        return error.SocketError;
+    };
+    defer posix.close(sock);
+
+    var addr: posix.sockaddr.un = .{ .path = undefined };
+    @memcpy(addr.path[0..socket_path.len], socket_path);
+    addr.path[socket_path.len] = 0;
+
+    posix.connect(sock, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch |err| {
+        if (err == error.ConnectionRefused or err == error.FileNotFound) {
+            try stdout.interface.print("Server not running.\n", .{});
+            return;
+        }
+        return err;
+    };
+
+    const request = try msgpack.encode(allocator, .{ 0, 1, "close_pty", .{.{ "id", pty_id }} });
+    defer allocator.free(request);
+
+    _ = try posix.write(sock, request);
+
+    var response_buf: [16384]u8 = undefined;
+    const n = try posix.read(sock, &response_buf);
+    if (n == 0) {
+        try stdout.interface.print("No response from server.\n", .{});
+        return;
+    }
+
+    const msg = rpc.decodeMessage(allocator, response_buf[0..n]) catch |err| {
+        log.err("Failed to decode response: {}", .{err});
+        return error.DecodeError;
+    };
+    defer msg.deinit(allocator);
+
+    if (msg != .response) {
+        try stdout.interface.print("Unexpected response type.\n", .{});
+        return;
+    }
+
+    if (msg.response.err) |err_val| {
+        const err_str = if (err_val == .string) err_val.string else "unknown error";
+        try stdout.interface.print("Server error: {s}\n", .{err_str});
+        return;
+    }
+
+    if (msg.response.result == .string) {
+        try stdout.interface.print("Error: {s}\n", .{msg.response.result.string});
+        return;
+    }
+
+    try stdout.interface.print("PTY {d} killed.\n", .{pty_id});
 }
 
 fn findMostRecentSession(allocator: std.mem.Allocator) ![]const u8 {
