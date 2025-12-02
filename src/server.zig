@@ -2431,15 +2431,6 @@ const Server = struct {
         return self.exit_on_idle and self.clients.items.len == 0;
     }
 
-    fn cleanupPtysForClient(self: *Server, client: *Client) void {
-        for (client.attached_ptys.items) |pty_id| {
-            if (self.ptys.get(pty_id)) |pty_instance| {
-                pty_instance.removeClient(client);
-                std.log.info("Auto-removed client {} from PTY {}", .{ client.fd, pty_id });
-            }
-        }
-    }
-
     fn checkExit(self: *Server) !void {
         if (self.shouldExit() and self.accepting) {
             self.accepting = false;
@@ -2512,8 +2503,12 @@ const Server = struct {
     fn removeClient(self: *Server, client: *Client) void {
         std.log.debug("Removing client fd={}", .{client.fd});
 
-        // Cleanup PTYs (kill if no clients remain and not keep_alive)
-        self.cleanupPtysForClient(client);
+        // Remove client from any PTYs it was attached to (but don't kill them)
+        for (client.attached_ptys.items) |pty_id| {
+            if (self.ptys.get(pty_id)) |pty_instance| {
+                pty_instance.removeClient(client);
+            }
+        }
 
         // Mark as closing to prevent new sends
         client.closing = true;
