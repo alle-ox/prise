@@ -25,7 +25,7 @@ const c = switch (builtin.os.tag) {
 const TIOCSCTTY = if (builtin.os.tag == .macos) 536900705 else c.TIOCSCTTY;
 const TIOCSWINSZ = if (builtin.os.tag == .macos) 2148037735 else c.TIOCSWINSZ;
 
-pub const winsize = c.winsize;
+pub const Winsize = c.winsize;
 
 pub const Process = struct {
     master: posix.fd_t,
@@ -44,7 +44,7 @@ pub const Process = struct {
 
     pub fn spawn(
         allocator: std.mem.Allocator,
-        size: winsize,
+        size: Winsize,
         argv: []const []const u8,
         env: ?[]const []const u8,
         cwd: ?[]const u8,
@@ -201,7 +201,7 @@ pub const Process = struct {
         }
     }
 
-    pub fn setSize(self: *Process, size: winsize) !void {
+    pub fn setSize(self: *Process, size: Winsize) !void {
         // Precondition: dimensions must be positive
         std.debug.assert(size.ws_row > 0);
         std.debug.assert(size.ws_col > 0);

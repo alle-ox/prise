@@ -107,7 +107,7 @@ const Pty = struct {
     // Pointer to server for callbacks (opaque to avoid circular type dependency)
     server_ptr: *anyopaque = undefined,
 
-    fn init(allocator: std.mem.Allocator, id: usize, process_instance: pty.Process, size: pty.winsize) !*Pty {
+    fn init(allocator: std.mem.Allocator, id: usize, process_instance: pty.Process, size: pty.Winsize) !*Pty {
         // Precondition: terminal size must be positive (zero would crash ghostty-vt)
         std.debug.assert(size.ws_col > 0);
         std.debug.assert(size.ws_row > 0);
@@ -1447,7 +1447,7 @@ const Client = struct {
                 pty_instance.terminal.cols, pty_instance.terminal.rows,
             });
 
-            const size: pty.winsize = .{
+            const size: pty.Winsize = .{
                 .ws_row = rows,
                 .ws_col = cols,
                 .ws_xpixel = x_pixel,
@@ -1681,7 +1681,7 @@ const Server = struct {
     signal_pipe_fds: [2]posix.fd_t,
     signal_buf: [1]u8 = undefined,
 
-    fn parseSpawnPtyParams(params: msgpack.Value) struct { size: pty.winsize, attach: bool, cwd: ?[]const u8 } {
+    fn parseSpawnPtyParams(params: msgpack.Value) struct { size: pty.Winsize, attach: bool, cwd: ?[]const u8 } {
         var rows: u16 = 24;
         var cols: u16 = 80;
         var attach: bool = false;
@@ -1934,7 +1934,7 @@ const Server = struct {
             pty_instance.terminal.rows,
         });
 
-        const size: pty.winsize = .{
+        const size: pty.Winsize = .{
             .ws_row = args.rows,
             .ws_col = args.cols,
             .ws_xpixel = args.x_pixel,
