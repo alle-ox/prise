@@ -777,13 +777,17 @@ pub const App = struct {
         self.ui.setQuitCallback(self, struct {
             fn quit(ctx: *anyopaque) void {
                 const app: *App = @ptrCast(@alignCast(ctx));
-                // Cancel autosave timer before deleting session
+                // Cancel autosave timer before final save
                 if (app.autosave_timer) |*task| {
                     if (app.io_loop) |l| task.cancel(l) catch {};
                     app.autosave_timer = null;
                 }
-                // Delete session file - Lua only calls quit when all panes are gone
-                app.deleteCurrentSession();
+                // Save session on quit; deletion is handled when last PTY exits
+                if (app.current_session_name) |name| {
+                    app.saveSession(name) catch |err| {
+                        log.warn("Failed to save session on quit: {}", .{err});
+                    };
+                }
                 app.state.should_quit = true;
                 if (app.connected) {
                     posix.close(app.fd);
