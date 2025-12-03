@@ -93,6 +93,10 @@ local state = {
         selected = 1,
         scroll_offset = 0,
     },
+    -- Tab bar hit regions: array of {start_x, end_x, tab_index}
+    tab_regions = {},
+    -- Currently hovered tab index (nil if none)
+    hovered_tab = nil,
 }
 
 local M = {}
@@ -1317,7 +1321,35 @@ function M.update(event)
         end
     elseif event.type == "mouse" then
         local d = event.data
+
+        -- Track tab hover state on motion
+        if d.action == "motion" and #state.tab_regions > 0 then
+            local new_hover = nil
+            if d.y < 1 then
+                for _, region in ipairs(state.tab_regions) do
+                    if d.x >= region.start_x and d.x < region.end_x then
+                        new_hover = region.tab_index
+                        break
+                    end
+                end
+            end
+            if new_hover ~= state.hovered_tab then
+                state.hovered_tab = new_hover
+                prise.request_frame()
+            end
+        end
+
         if d.action == "press" and d.button == "left" then
+            -- Check if click is on tab bar (y < 1 and we have tab regions)
+            if d.y < 1 and #state.tab_regions > 0 then
+                for _, region in ipairs(state.tab_regions) do
+                    if d.x >= region.start_x and d.x < region.end_x then
+                        set_active_tab_index(region.tab_index)
+                        return
+                    end
+                end
+            end
+
             -- Focus the clicked pane
             if d.target and d.target ~= state.focused_id then
                 local old_id = state.focused_id
@@ -1510,15 +1542,36 @@ end
 ---@return table?
 local function build_tab_bar()
     if #state.tabs <= 1 then
+        state.tab_regions = {}
         return nil
     end
 
     local segments = {}
+    local x_pos = 0
+    state.tab_regions = {}
+
     for i, tab in ipairs(state.tabs) do
         local is_active = (i == state.active_tab)
+        local is_hovered = (i == state.hovered_tab)
         local label = " " .. (tab.title or tostring(i)) .. " "
+        local label_width = #label
 
-        local style = is_active and { bg = THEME.accent, fg = THEME.fg_dark } or { bg = THEME.bg2, fg = THEME.fg_dim }
+        -- Record hit region for this tab
+        table.insert(state.tab_regions, {
+            start_x = x_pos,
+            end_x = x_pos + label_width,
+            tab_index = i,
+        })
+        x_pos = x_pos + label_width
+
+        local style
+        if is_active then
+            style = { bg = THEME.accent, fg = THEME.fg_dark }
+        elseif is_hovered then
+            style = { bg = THEME.bg3, fg = THEME.fg_bright }
+        else
+            style = { bg = THEME.bg2, fg = THEME.fg_dim }
+        end
 
         table.insert(segments, { text = label, style = style })
     end
