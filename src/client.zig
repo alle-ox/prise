@@ -283,6 +283,12 @@ pub const ClientLogic = struct {
                 .attach => |attach_info| {
                     state.pty_id = attach_info.pty_id;
                     state.attached = true;
+                    if (attach_info.cwd) |c| {
+                        const owned_cwd = state.allocator.dupe(u8, c) catch return .{ .attached = attach_info.pty_id };
+                        state.cwd_map.put(attach_info.pty_id, owned_cwd) catch {
+                            state.allocator.free(owned_cwd);
+                        };
+                    }
                     return .{ .attached = attach_info.pty_id };
                 },
                 .detach => .detached,
