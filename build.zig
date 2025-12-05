@@ -164,6 +164,7 @@ pub fn build(b: *std.Build) void {
     // Generate HTML documentation (not installed, for website builds)
     const web_step = b.step("web", "Generate HTML documentation");
     const web_wf = b.addWriteFiles();
+    _ = web_wf.addCopyFile(b.path("docs/web/index.html"), "index.html");
     inline for (man_sources) |entry| {
         const md_file, _, _ = entry;
         const html_file = md_file[0 .. md_file.len - 3] ++ ".html";
