@@ -15,9 +15,6 @@ jobs:
           - os: macos-latest
             target: aarch64-macos
             artifact: prise-aarch64-macos
-          - os: macos-latest
-            target: x86_64-macos
-            artifact: prise-x86_64-macos
           - os: ubuntu-latest
             target: x86_64-linux
             artifact: prise-x86_64-linux
