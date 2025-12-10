@@ -45,6 +45,28 @@ pub fn deleteForward(self: *TextInput) void {
     }
 }
 
+pub fn deleteWordBackward(self: *TextInput) void {
+    if (self.cursor == 0) return;
+
+    var end = self.cursor;
+    while (end > 0 and self.buffer.items[end - 1] == ' ') {
+        end -= 1;
+    }
+    while (end > 0 and self.buffer.items[end - 1] != ' ') {
+        end -= 1;
+    }
+
+    const count = self.cursor - end;
+    for (0..count) |_| {
+        _ = self.buffer.orderedRemove(end);
+    }
+    self.cursor = end;
+}
+
+pub fn killLine(self: *TextInput) void {
+    self.buffer.shrinkRetainingCapacity(self.cursor);
+}
+
 pub fn moveLeft(self: *TextInput) void {
     if (self.cursor > 0) {
         self.cursor -= 1;

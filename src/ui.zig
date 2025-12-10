@@ -1100,6 +1100,14 @@ fn textInputIndex(lua: *ziglua.Lua) i32 {
         lua.pushFunction(ziglua.wrap(textInputDeleteForward));
         return 1;
     }
+    if (std.mem.eql(u8, key, "delete_word_backward")) {
+        lua.pushFunction(ziglua.wrap(textInputDeleteWordBackward));
+        return 1;
+    }
+    if (std.mem.eql(u8, key, "kill_line")) {
+        lua.pushFunction(ziglua.wrap(textInputKillLine));
+        return 1;
+    }
     if (std.mem.eql(u8, key, "move_left")) {
         lua.pushFunction(ziglua.wrap(textInputMoveLeft));
         return 1;
@@ -1166,6 +1174,18 @@ fn textInputDeleteBackward(lua: *ziglua.Lua) i32 {
 fn textInputDeleteForward(lua: *ziglua.Lua) i32 {
     const input = getTextInput(lua) orelse return 0;
     input.deleteForward();
+    return 0;
+}
+
+fn textInputDeleteWordBackward(lua: *ziglua.Lua) i32 {
+    const input = getTextInput(lua) orelse return 0;
+    input.deleteWordBackward();
+    return 0;
+}
+
+fn textInputKillLine(lua: *ziglua.Lua) i32 {
+    const input = getTextInput(lua) orelse return 0;
+    input.killLine();
     return 0;
 }
 

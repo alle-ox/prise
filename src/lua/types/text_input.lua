@@ -22,6 +22,12 @@ function TextInput:delete_backward() end
 ---Delete the character after the cursor
 function TextInput:delete_forward() end
 
+---Delete the word before the cursor
+function TextInput:delete_word_backward() end
+
+---Delete from cursor to end of line
+function TextInput:kill_line() end
+
 ---Move the cursor one position to the left
 function TextInput:move_left() end
 

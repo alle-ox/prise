@@ -316,6 +316,55 @@ end
 
 -- --- Helpers ---
 
+---Handle common text input key events
+---@param input TextInput
+---@param key_data PtyKeyData
+---@return boolean handled
+local function handle_text_input_key(input, key_data)
+    local k = key_data.key
+    local ctrl = key_data.ctrl
+
+    if k == "Backspace" then
+        input:delete_backward()
+        prise.request_frame()
+        return true
+    elseif k == "Delete" then
+        input:delete_forward()
+        prise.request_frame()
+        return true
+    elseif k == "w" and ctrl then
+        input:delete_word_backward()
+        prise.request_frame()
+        return true
+    elseif k == "k" and ctrl then
+        input:kill_line()
+        prise.request_frame()
+        return true
+    elseif k == "ArrowLeft" then
+        input:move_left()
+        prise.request_frame()
+        return true
+    elseif k == "ArrowRight" then
+        input:move_right()
+        prise.request_frame()
+        return true
+    elseif k == "Home" or (k == "a" and ctrl) then
+        input:move_to_start()
+        prise.request_frame()
+        return true
+    elseif k == "End" or (k == "e" and ctrl) then
+        input:move_to_end()
+        prise.request_frame()
+        return true
+    elseif #k == 1 and not ctrl and not key_data.alt and not key_data.super then
+        input:insert(k)
+        prise.request_frame()
+        return true
+    end
+
+    return false
+end
+
 ---@param node? table
 ---@return boolean
 local function is_pane(node)
@@ -1583,15 +1632,13 @@ function M.update(event)
                     prise.request_frame()
                 end
                 return
-            elseif k == "Backspace" then
-                state.palette.input:delete_backward()
-                state.palette.selected = 1
-                prise.request_frame()
-                return
-            elseif #k == 1 and not event.data.ctrl and not event.data.alt and not event.data.super then
-                state.palette.input:insert(k)
-                state.palette.selected = 1
-                prise.request_frame()
+            end
+
+            local old_text = state.palette.input:text()
+            if handle_text_input_key(state.palette.input, event.data) then
+                if state.palette.input:text() ~= old_text then
+                    state.palette.selected = 1
+                end
                 return
             end
             return
@@ -1607,15 +1654,8 @@ function M.update(event)
             elseif k == "Enter" then
                 execute_rename()
                 return
-            elseif k == "Backspace" then
-                state.rename.input:delete_backward()
-                prise.request_frame()
-                return
-            elseif #k == 1 and not event.data.ctrl and not event.data.alt and not event.data.super then
-                state.rename.input:insert(k)
-                prise.request_frame()
-                return
             end
+            handle_text_input_key(state.rename.input, event.data)
             return
         end
 
@@ -1629,15 +1669,8 @@ function M.update(event)
             elseif k == "Enter" then
                 execute_rename_tab()
                 return
-            elseif k == "Backspace" then
-                state.rename_tab.input:delete_backward()
-                prise.request_frame()
-                return
-            elseif #k == 1 and not event.data.ctrl and not event.data.alt and not event.data.super then
-                state.rename_tab.input:insert(k)
-                prise.request_frame()
-                return
             end
+            handle_text_input_key(state.rename_tab.input, event.data)
             return
         end
 
