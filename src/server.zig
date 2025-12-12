@@ -1307,8 +1307,13 @@ const Client = struct {
                 pty_instance.terminal.scrollViewport(.bottom) catch |err| {
                     log.err("Failed to scroll viewport: {}", .{err});
                 };
+                pty_instance.terminal.screens.active.select(null) catch {};
             }
             pty_instance.terminal_mutex.unlock();
+
+            if (encoded.len > 0 and !key.key.modifier()) {
+                _ = posix.write(pty_instance.pipe_fds[1], "x") catch {};
+            }
 
             if (encoded.len > 0) {
                 _ = posix.write(pty_instance.process.master, encoded) catch |err| {
@@ -1589,6 +1594,7 @@ const Client = struct {
                 ) catch |err| {
                     log.err("Resize terminal failed: {}", .{err});
                 };
+                pty_instance.terminal.screens.active.select(null) catch {};
             }
             // Update pixel dimensions for mouse encoding
             pty_instance.terminal.width_px = x_pixel;
