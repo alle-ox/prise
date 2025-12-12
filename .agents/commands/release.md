@@ -46,7 +46,7 @@ Run these commands and fix any issues:
 After verification passes:
 1. Stage all changes: `git add build.zig.zon docs/releases/`
 2. Commit the version bump and release notes: `git commit -m "release: vX.Y.Z"`
-3. Create the tag: `git tag vX.Y.Z`
+3. Create a signed tag: `git tag -s vX.Y.Z -m "Release vX.Y.Z"`
 
 ## 7. Push (only if user confirms)
 
