@@ -933,6 +933,12 @@ pub const UI = struct {
         _ = loop;
         const ctx = completion.userdataCast(TimerContext);
 
+        // Check if timer was cancelled (io_uring only - kqueue never calls back on cancel)
+        if (completion.result == .err) {
+            ctx.ui.allocator.destroy(ctx);
+            return;
+        }
+
         // Get Timer userdata
         _ = ctx.ui.lua.rawGetIndex(ziglua.registry_index, ctx.timer_ref);
         const timer = ctx.ui.lua.toUserdata(Timer, -1) catch unreachable;
