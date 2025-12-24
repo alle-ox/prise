@@ -43,7 +43,7 @@ jobs:
         run: zig build test
 
       - name: Build
-        run: zig build -Doptimize=ReleaseFast ${{ matrix.target && format('-Dtarget={0}', matrix.target) || '' }}
+        run: zig build -Doptimize=ReleaseFast -Dlua-check=false ${{ matrix.target && format('-Dtarget={0}', matrix.target) || '' }}
 
       - name: Package
         run: |
